@@ -67,9 +67,9 @@ def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: 
         kappa = metrics.cohen_kappa_score(all_labels_np, all_preds_np)
         return total_loss / num_batches, accuracy, 2 * (auc - .5), kappa
 
-def pretrain(model_name: str, options: TrainOptions):
+def pretrain(model_name: str, data_file: str, options: TrainOptions):
     # import pdb; pdb.set_trace()
-    train_data, validation_data = get_data("data/train_data.json", .8)
+    train_data, validation_data = get_data(data_file or "data/train_data.json", .8)
     train_loader = torch.utils.data.DataLoader(
         Dataset(train_data),
         collate_fn=Collator(),
@@ -112,9 +112,9 @@ def pretrain(model_name: str, options: TrainOptions):
               f"Val Loss: {val_loss:.3f}, Val Accuracy: {val_accuracy:.3f}, Time: {time.time() - start_time:.2f}")
         torch.save(model.state_dict(), f"{model_name}.pt")
 
-def test_pretrain(model_name: str, options: TrainOptions):
+def test_pretrain(model_name: str, data_file: str, options: TrainOptions):
     # Load validation data
-    test_data = get_data("data/test_data.json")
+    test_data = get_data(data_file or "data/test_data.json")
     test_loader = torch.utils.data.DataLoader(
         Dataset(test_data),
         collate_fn=Collator(),
@@ -137,8 +137,8 @@ def test_pretrain(model_name: str, options: TrainOptions):
     loss, accuracy, _, _ = evaluate_model(model, test_loader, Mode.PRE_TRAIN)
     print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}")
 
-def train(pretrain_model_name: str, model_name: str, options: TrainOptions):
-    train_data, validation_data = get_data("data/train_data.json", .8)
+def train(pretrain_model_name: str, model_name: str, data_file: str, options: TrainOptions):
+    train_data, validation_data = get_data(data_file or "data/train_data.json", .8)
     train_labels = get_labels("data/train_labels.json")
     train_loader = torch.utils.data.DataLoader(
         Dataset(train_data, train_labels),
@@ -185,11 +185,13 @@ def train(pretrain_model_name: str, model_name: str, options: TrainOptions):
             param.requires_grad = False
 
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
+
+    # TODO: commonize training code
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-6)
     torch.autograd.set_detect_anomaly(True) # Pause exectuion and get stack trace if something weird happens (ex: NaN grads)
     best_loss = None
     best_epoch = 0
-    for epoch in range(50):
+    for epoch in range(200):
         start_time = time.time()
         model.train() # Set model to training mode
         train_loss = 0
@@ -210,20 +212,20 @@ def train(pretrain_model_name: str, model_name: str, options: TrainOptions):
         print(f"Epoch: {epoch + 1}, Train Loss: {train_loss:.3f}, Train Accuracy: {train_accuracy:.3f}, Train AUC: {train_auc:.3f}, "
               f"Val Loss: {val_loss:.3f}, Val Accuracy: {val_accuracy:.3f}, Val AUC: {val_auc:.3f}, Time: {time.time() - start_time:.2f}")
 
-        torch.save(model.state_dict(), f"{model_name}.pt")
-
-        # Analyze validation loss curve
+        # Save model for best validation loss
         if not best_loss or val_loss < best_loss:
             best_loss = val_loss
             best_epoch = epoch
+            torch.save(model.state_dict(), f"{model_name}.pt")
+
         # Stop training if we haven't improved in a while
-        if epoch - best_epoch >= 10:
+        if epoch - best_epoch >= 20:
             print("Early stopping")
             break
 
-def test_predictor(model_name: str, options: TrainOptions):
+def test_predictor(model_name: str, data_file: str, options: TrainOptions):
     # Load validation data
-    test_data = get_data("data/test_data.json")
+    test_data = get_data(data_file or "data/test_data.json")
     test_loader = torch.utils.data.DataLoader(
         Dataset(test_data, get_labels("data/test_labels.json")),
         collate_fn=Collator(),

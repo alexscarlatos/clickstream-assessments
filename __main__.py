@@ -8,10 +8,10 @@ So the shape of the data is num_questions x longest_question_stream x event_vect
 Then we'll feed the data into the RNN in batches, and then RNN will have to feed into a classifier.
 The classifier will be a linear layer with softmax that predicts an event type.
 
-Things to try now:
- - Try adding extra linear layer to frozen model
-
 Pretraining Enhancements:
+ - New objectives:
+    - Predict timestep (as a proportion between previous and post timesteps)
+    - Predict next question (only at events where question is actually changing)
  - Split into per-question streams and capture switching between questions
  - Expand ExtendedInfo into new events
  - Restrict event predictions to those possible for associated question types
@@ -23,12 +23,17 @@ Pretraining Enhancements:
      -Use per-question sequences for pretraining
 
 Training Enhancements:
- - Adjust learning rate
+  - Mix in engineered features:
+    - Per question:
+        - Correctness
+        - Amount of time taken?
+ - Visualize attention and analyze
  - First train final layer on top of frozen pretrained model, and then fine-tune whole thing
- - Train for more epochs and plot learning curve
 '''
 
 import argparse
+import json
+import os
 import torch
 import numpy as np
 import random
@@ -50,7 +55,11 @@ PRED_STATES = {
     "both_concat": PredictionState.BOTH_CONCAT,
     "both_sum": PredictionState.BOTH_SUM,
     "avg": PredictionState.AVG,
+    "attn": PredictionState.ATTN,
 }
+
+def bool_type(arg):
+    return False if arg == "0" else True
 
 def initialize_seeds(seedNum):
     # TODO: analyze this and make sure it's all necessary
@@ -66,27 +75,39 @@ def initialize_seeds(seedNum):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Clickstream Assessments")
-    parser.add_argument("--data", nargs="+", help="Process raw data into json format")
+    parser.add_argument("--process_data", nargs="+", help="Process raw data files into json format")
     parser.add_argument("--labels", help="Process raw labels into json format")
     parser.add_argument("--types", help="Calculate event types")
     parser.add_argument("--out", help="File to output processed data to")
     parser.add_argument("--trim_after", help="Stop processing streams after they exceed this many seconds", type=float)
     parser.add_argument("--name", help="Filename to save model to", default="models/model")
     parser.add_argument("--pretrained_name", help="File that contains pretrained model", default="models/model")
+    parser.add_argument("--data_src", help="File to use as data source")
     parser.add_argument("--pretrain", help="Pre-train the LSTM model", action="store_true")
     parser.add_argument("--test_pretrain", help="Validate pretrained model", action="store_true")
     parser.add_argument("--train", help="Train the LSTM predictor", action="store_true")
     parser.add_argument("--test_predictor", help="Validate predictive model", action="store_true")
-    parser.add_argument("--lstm_dir", help="LSTM direction", choices=list(LSTM_DIRS.values()), type=lambda lstm_dir: LSTM_DIRS.get(lstm_dir), default=Direction.BI)
-    parser.add_argument("--pretrained_model", action="store_true")
-    parser.add_argument("--pretrained_emb", action="store_true")
-    parser.add_argument("--freeze_model", action="store_true")
-    parser.add_argument("--freeze_emb", action="store_true")
-    parser.add_argument("--pred_state", choices=list(PRED_STATES.values()), type=lambda pred_state: PRED_STATES.get(pred_state), default=PredictionState.BOTH_CONCAT)
-    parser.add_argument("--attention", action="store_true")
+    parser.add_argument("--config", help="Config file for multiple runs")
+    parser.add_argument("--lstm_dir", help="LSTM direction", choices=list(LSTM_DIRS.keys()))
+    parser.add_argument("--pretrained_model", type=bool_type)
+    parser.add_argument("--pretrained_emb", type=bool_type)
+    parser.add_argument("--freeze_model", type=bool_type)
+    parser.add_argument("--freeze_emb", type=bool_type)
+    parser.add_argument("--pred_state", choices=list(PRED_STATES.keys()))
     parser.add_argument("--dropout", type=float)
+    parser.add_argument("--hidden_ff_layer", type=bool_type)
     args = parser.parse_args()
-    arg_dict = {arg: val for arg, val in vars(args).items() if val is not None}
+
+    if os.path.isfile("default.json"):
+        with open("default.json") as default_param_file:
+            arg_dict: dict = json.load(default_param_file)
+    else:
+        arg_dict = {}
+
+    arg_dict.update({arg: val for arg, val in vars(args).items() if val is not None})
+    arg_dict["lstm_dir"] = LSTM_DIRS.get(arg_dict.get("lstm_dir"), Direction.BI)
+    arg_dict["pred_state"] = PRED_STATES.get(arg_dict.get("pred_state"), PredictionState.BOTH_CONCAT)
+    print("Settings:", arg_dict)
 
     initialize_seeds(221)
 
@@ -95,15 +116,15 @@ if __name__ == "__main__":
 
     if args.types:
         save_type_mappings(args.types)
-    if args.data:
-        convert_raw_data_to_json(args.data, args.out, args.trim_after)
+    if args.process_data:
+        convert_raw_data_to_json(args.process_data, args.out, args.trim_after)
     if args.labels:
         convert_raw_labels_to_json(args.labels, args.out)
     if args.pretrain:
-        pretrain(args.name, TrainOptions(arg_dict))
+        pretrain(args.name, args.data_src, TrainOptions(arg_dict))
     if args.test_pretrain:
-        test_pretrain(args.name, TrainOptions(arg_dict))
+        test_pretrain(args.name, args.data_src, TrainOptions(arg_dict))
     if args.train:
-        train(args.pretrained_name, args.name, TrainOptions(arg_dict))
+        train(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
     if args.test_predictor:
-        test_predictor(args.name, TrainOptions(arg_dict))
+        test_predictor(args.name, args.data_src, TrainOptions(arg_dict))

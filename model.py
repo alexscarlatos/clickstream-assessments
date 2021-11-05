@@ -23,6 +23,7 @@ class PredictionState(Enum):
     BOTH_SUM = 3
     BOTH_CONCAT = 4
     AVG = 5
+    ATTN = 6
 
 class TrainOptions:
     def __init__(self, options: dict):
@@ -31,9 +32,9 @@ class TrainOptions:
         self.use_pretrained_embeddings: bool = options.get("pretrained_emb", True)
         self.freeze_model: bool = options.get("freeze_model", True)
         self.freeze_embeddings: bool = options.get("freeze_emb", True)
-        self.prediction_state: PredictionState = options.get("pred_state", PredictionState.AVG)
-        self.attention: bool = options.get("attention", True)
+        self.prediction_state: PredictionState = options.get("pred_state", PredictionState.BOTH_CONCAT)
         self.dropout: float = options.get("dropout", 0.25)
+        self.hidden_ff_layer: bool = options.get("hidden_ff_layer", False)
 
 class LSTMModel(nn.Module):
     def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions):
@@ -51,16 +52,24 @@ class LSTMModel(nn.Module):
         self.input_size = question_type_embedding_size + event_type_embedding_size + 1
         # self.input_size = question_embedding_size + question_type_embedding_size + event_type_embedding_size + 1
         # TODO: use GRU instead?
-        self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=hidden_size, batch_first=True, bidirectional=options.lstm_dir in (Direction.BACK, Direction.BI))
+        self.lstm = nn.LSTM(
+            input_size=self.input_size,
+            hidden_size=hidden_size,
+            batch_first=True,
+            bidirectional=options.lstm_dir in (Direction.BACK, Direction.BI)
+        )
         if mode == Mode.PRE_TRAIN:
             self.output_layer = nn.Linear(hidden_size * (2 if options.lstm_dir == Direction.BI else 1), self.num_event_types)
         if mode == Mode.PREDICT:
-            # TODO: try multiple layers here
-            self.pred_output_layer = nn.Linear(hidden_size * (2 if options.prediction_state in (PredictionState.BOTH_CONCAT, PredictionState.AVG) else 1), 1)
+            output_size = hidden_size * (2 if options.prediction_state in (PredictionState.BOTH_CONCAT, PredictionState.ATTN, PredictionState.AVG) else 1)
+            self.attention = nn.Linear(output_size, 1)
+            self.hidden_layers = nn.Sequential(
+                nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(output_size, output_size))
+            self.pred_output_layer = nn.Sequential(
+                nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(output_size, 1))
 
     def forward(self, batch):
         # import pdb; pdb.set_trace()
-        # TODO: account for device to move to GPU
         batch_size = batch["event_types"].shape[0]
         # questions = self.question_embeddings(batch["question_ids"])
         question_types = self.question_type_embeddings(batch["question_types"])
@@ -69,7 +78,9 @@ class LSTMModel(nn.Module):
 
         lstm_input = torch.cat([question_types, event_types, time_deltas], dim=-1)
         # lstm_input = torch.cat([questions, question_types, event_types, time_deltas], dim=-1)
-        # lstm_input = self.dropout(lstm_input)
+        # TODO: is this the right condition to not do dropout?
+        if not self.options.freeze_model:
+            lstm_input = self.dropout(lstm_input)
 
         packed_lstm_input = torch.nn.utils.rnn.pack_padded_sequence(
             lstm_input, lengths=batch["sequence_lengths"], batch_first=True, enforce_sorted=False)
@@ -110,8 +121,19 @@ class LSTMModel(nn.Module):
 
         if self.mode == Mode.PREDICT:
             pred_state = None
-            if self.options.prediction_state == PredictionState.AVG:
-                pred_state = lstm_output.mean(dim=1)
+            if self.options.prediction_state == PredictionState.ATTN:
+                # Multiply each output vector with learnable attention vector to get attention activations at each timestep
+                activations = self.attention(lstm_output).squeeze(2) # batch_size x max_seq_len
+                # Apply mask so that output in padding regions gets 0 probability after softmax
+                activations[batch["mask"] == 0] = -torch.inf
+                # Apply softmax to get distribution across timesteps of each sequence
+                attention_weights = nn.Softmax(dim=1)(activations) # batch_size x max_seq_len
+                # Multiply each output vector with its corresponding attention weight
+                weighted_output = lstm_output * attention_weights.unsqueeze(2)
+                # Add weighted output vectors along each sequence in the batch
+                pred_state = torch.sum(weighted_output, dim=1)
+            elif self.options.prediction_state == PredictionState.AVG:
+                pred_state = lstm_output.mean(dim=1) # Average output vectors along each sequence in the batch
             else:
                 final_fwd_state = hidden[0]
                 if self.options.prediction_state == PredictionState.LAST:
@@ -125,10 +147,11 @@ class LSTMModel(nn.Module):
                     if self.options.prediction_state == PredictionState.BOTH_CONCAT:
                         pred_state = torch.cat([final_fwd_state, final_back_state], dim=-1)
 
-                if self.options.attention:
-                    pass # TODO
-
-            predictions = self.pred_output_layer(pred_state).view(-1)
+            # Get predictions for batch
+            if self.options.hidden_ff_layer:
+                predictions = self.pred_output_layer(self.hidden_layers(pred_state)).view(-1)
+            else:
+                predictions = self.pred_output_layer(pred_state).view(-1)
             labels = batch["labels"]
 
             # Get cross entropy loss of predictions with labels, note that this automatically performs the sigmoid step
