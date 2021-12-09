@@ -9,6 +9,8 @@ Then we'll feed the data into the RNN in batches, and then RNN will have to feed
 The classifier will be a linear layer with softmax that predicts an event type.
 
 Pretraining Enhancements:
+ - Use [0,1] normalized timestamps?
+ - Train on time slices of training data to generalize to different test lengths
  - New objectives:
     - Predict timestep (as a proportion between previous and post timesteps)
     - Predict next question (only at events where question is actually changing)
@@ -20,7 +22,6 @@ Pretraining Enhancements:
 
  - Stretches:
     - Masked language modeling alternative to LSTMs
-     -Use per-question sequences for pretraining
 
 Training Enhancements:
   - Mix in engineered features:
@@ -28,7 +29,6 @@ Training Enhancements:
         - Correctness
         - Amount of time taken?
  - Visualize attention and analyze
- - First train final layer on top of frozen pretrained model, and then fine-tune whole thing
 '''
 
 import argparse
@@ -38,7 +38,7 @@ import torch
 import numpy as np
 import random
 from dataset import save_type_mappings, convert_raw_data_to_json, convert_raw_labels_to_json
-from training import pretrain, train, test_pretrain, test_predictor
+from training import pretrain, train_predictor, test_pretrain, test_predictor, cluster
 from model import TrainOptions, PredictionState, Direction
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -62,13 +62,11 @@ def bool_type(arg):
     return False if arg == "0" else True
 
 def initialize_seeds(seedNum):
-    # TODO: analyze this and make sure it's all necessary
+    random.seed(seedNum)
     np.random.seed(seedNum)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.manual_seed(seedNum)
-    np.random.seed(seedNum)
-    random.seed(seedNum)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seedNum)
         torch.cuda.manual_seed_all(seedNum)
@@ -76,10 +74,11 @@ def initialize_seeds(seedNum):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Clickstream Assessments")
     parser.add_argument("--process_data", nargs="+", help="Process raw data files into json format")
+    parser.add_argument("--data_classes", nargs="+", help="Assign data_class of each sequence in corresponding data file")
     parser.add_argument("--labels", help="Process raw labels into json format")
     parser.add_argument("--types", help="Calculate event types")
     parser.add_argument("--out", help="File to output processed data to")
-    parser.add_argument("--trim_after", help="Stop processing streams after they exceed this many seconds", type=float)
+    parser.add_argument("--trim_after", nargs="+", type=float, help="Stop processing streams after they exceed this many seconds for each data file")
     parser.add_argument("--name", help="Filename to save model to", default="models/model")
     parser.add_argument("--pretrained_name", help="File that contains pretrained model", default="models/model")
     parser.add_argument("--data_src", help="File to use as data source")
@@ -87,15 +86,21 @@ if __name__ == "__main__":
     parser.add_argument("--test_pretrain", help="Validate pretrained model", action="store_true")
     parser.add_argument("--train", help="Train the LSTM predictor", action="store_true")
     parser.add_argument("--test_predictor", help="Validate predictive model", action="store_true")
-    parser.add_argument("--config", help="Config file for multiple runs")
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--weight_decay", type=float)
+    parser.add_argument("--split_data", action="store_true")
     parser.add_argument("--lstm_dir", help="LSTM direction", choices=list(LSTM_DIRS.keys()))
     parser.add_argument("--pretrained_model", type=bool_type)
     parser.add_argument("--pretrained_emb", type=bool_type)
+    parser.add_argument("--pretrained_head", type=bool_type)
     parser.add_argument("--freeze_model", type=bool_type)
     parser.add_argument("--freeze_emb", type=bool_type)
     parser.add_argument("--pred_state", choices=list(PRED_STATES.keys()))
     parser.add_argument("--dropout", type=float)
     parser.add_argument("--hidden_ff_layer", type=bool_type)
+    parser.add_argument("--eng_feat", type=bool_type)
+    parser.add_argument("--multi_head", type=bool_type)
+    parser.add_argument("--cluster", action="store_true")
     args = parser.parse_args()
 
     if os.path.isfile("default.json"):
@@ -117,7 +122,7 @@ if __name__ == "__main__":
     if args.types:
         save_type_mappings(args.types)
     if args.process_data:
-        convert_raw_data_to_json(args.process_data, args.out, args.trim_after)
+        convert_raw_data_to_json(args.process_data, args.out, args.trim_after, args.data_classes)
     if args.labels:
         convert_raw_labels_to_json(args.labels, args.out)
     if args.pretrain:
@@ -125,6 +130,8 @@ if __name__ == "__main__":
     if args.test_pretrain:
         test_pretrain(args.name, args.data_src, TrainOptions(arg_dict))
     if args.train:
-        train(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
+        train_predictor(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
     if args.test_predictor:
         test_predictor(args.name, args.data_src, TrainOptions(arg_dict))
+    if args.cluster:
+        cluster(args.name, args.data_src, TrainOptions(arg_dict))
