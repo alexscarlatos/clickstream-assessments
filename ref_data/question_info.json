@@ -1,0 +1,113 @@
+{
+    "VH356862": {"block": "A", "type": "Directions", "answer": "na"},
+    "VH098810": {"block": "A", "type": "MCSS", "answer": "4"},
+    "VH098519": {"block": "A", "type": "MCSS", "answer": "2"},
+    "VH098808": {"block": "A", "type": "MCSS", "answer": "3"},
+    "VH139047": {"block": "A", "type": "MatchMS", "answer": [
+        {"1": "3", "2": "1", "3": "2", "4": "4"}
+    ]},
+    "VH098759": {"block": "A", "type": "MCSS", "answer": "1"},
+    "VH098740": {"block": "A", "type": "MCSS", "answer": "4"},
+    "VH134366": {"block": "A", "type": "MultipleFillInBlank", "answer": {
+        "1": "3.75",
+        "2": ["5", "5.0", "5.00"],
+        "3": "6.25",
+        "4": ["7.5", "7.50"],
+        "5": "8.75"
+    }},
+    "VH098753": {"block": "A", "type": "MCSS", "answer": "4"},
+    "VH134387": {"block": "A", "type": "FillInBlank", "answer": "60"},
+    "VH098783": {"block": "A", "type": "MCSS", "answer": "2"},
+    "BlockRev": {"block": "na", "type": "BlockReview", "answer": "na"},
+    "VH098812": {"block": "A", "type": "MCSS", "answer": "2"},
+    "VH139196": {"block": "A", "type": "CompositeCR", "answer": {
+        "A": {
+            "type": "FillInBlank",
+            "answer": ["0.8", ".8", "0.80", ".80"]
+        },
+        "B": {
+            "type": "FillInBlank",
+            "answer": ["1.4", "1.40"]
+        },
+        "C": {
+            "type": "FillInBlank",
+            "answer": ["1.1", "1.10"]
+        }
+    }},
+    "VH134373": {"block": "A", "type": "FillInBlank", "answer": "35"},
+    "VH098839": {"block": "A", "type": "MCSS", "answer": "4"},
+    "VH098597": {"block": "A", "type": "MCSS", "answer": "5"},
+    "VH098556": {"block": "A", "type": "MCSS", "answer": "4"},
+    "VH098522": {"block": "A", "type": "MCSS", "answer": "4"},
+    "VH098779": {"block": "A", "type": "MCSS", "answer": "4"},
+    "VH098834": {"block": "A", "type": "MCSS", "answer": "1"},
+    "EOSTimeLft": {"block": "na", "type": "TimeLeftMessage", "answer": "na"},
+    "VH356842": {"block": "B", "type": "Directions", "answer": "na"},
+    "VH266695": {"block": "B", "type": "MCSS", "answer": "3"},
+    "VH304549": {"block": "B", "type": "MatchMS", "answer": [
+        {"1": "1", "2": "5", "3": "2", "4": "3", "5": "4"},
+        {"1": "5", "2": "1", "3": "2", "4": "3", "5": "4"}
+    ]},
+    "VH336968": {"block": "B", "type": "FillInBlank", "answer": "7.35"},
+    "VH303873": {"block": "B", "type": "MatchMS", "answer": [
+        {"1": "1", "2": "4"}
+    ]},
+    "VH263651": {"block": "B", "type": "GridMS", "answer": {"1": "1", "2": "4", "3": "5", "4": "8"}},
+    "VH304553": {"block": "B", "type": "MatchMS", "answer": [
+        {"1": "1", "2": "2", "3": "6", "4": "6", "5": "2", "6": "1"}
+    ]},
+    "VH262355": {"block": "B", "type": "FillInBlank", "answer": "36"},
+    "VH287980": {"block": "B", "type": "MCSS", "answer": "4"},
+    "VH304990": {"block": "B", "type": "MatchMS", "answer": [
+        {"1": "2", "2": "1", "3": "3"}
+    ]},
+    "VH344346": {"block": "B", "type": "CompositeCR", "answer": {
+        "A": {
+            "type": "FillInBlank",
+            "answer": "6T"
+        },
+        "B": {
+            "type": "FillInBlank",
+            "answer": "10V"
+        }
+    }},
+    "VH261992": {"block": "B", "type": "MatchMS", "answer": [
+        {"1": "1", "2": "3", "3": "2", "4": "5"}
+    ]},
+    "VH302900": {"block": "B", "type": "GridMS", "answer": {"1": "1", "2": "9", "3": "15"}},
+    "VH304197": {"block": "B", "type": "CompositeCR", "answer": {
+        "A": {
+            "type": "MCSS",
+            "answer": "2"
+        }
+    }},
+    "VH271388": {"block": "B", "type": "ZonesMS", "answer": ["1", "3", "4", "6"]},
+    "VH302334": {"block": "B", "type": "CompositeCR", "answer": {
+        "A": {
+            "type": "ZonesMS",
+            "answer": ["2", "4"]
+        },
+        "B": {
+            "type": "MultipleFillInBlank",
+            "answer": {
+                "1": ["1", "2"],
+                "2": ["1", "2"],
+                "3": "3",
+                "4": "3",
+                "5": "4",
+                "6": "7",
+                "7": "8",
+                "8": "8"
+            }
+        }
+    }},
+    "VH325838": {"block": "Questionnaire", "type": "Directions", "answer": "na"},
+    "VH240003": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
+    "VH260313": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
+    "VH333658": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
+    "VH333660": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
+    "VH333661": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
+    "HELPMAT8": {"block": "na", "type": "Help", "answer": "na"},
+    "SecTimeOut": {"block": "na", "type": "TimeOutMessage", "answer": "na"},
+    "RaiseHand": {"block": "na", "type": "Dialog", "answer": "na"}
+}

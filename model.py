@@ -3,13 +3,12 @@ from enum import Enum
 import torch
 from torch import nn
 from constants import ASSISTIVE_EVENT_IDS
+from utils import device
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-question_embedding_size = 16
-question_type_embedding_size = 128
-event_type_embedding_size = 128
-hidden_size = 128
+question_embedding_size = 32
+question_type_embedding_size = 32
+event_type_embedding_size = 32
+hidden_size = 64
 
 class Mode(Enum):
     PRE_TRAIN = 1
@@ -31,9 +30,13 @@ class PredictionState(Enum):
 
 class TrainOptions:
     def __init__(self, options: dict):
+        self.task: str = options.get("task", "comp")
+
         self.lr: float = options.get("lr", 1e-4)
         self.weight_decay: bool = options.get("weight_decay", 1e-6)
+        self.epochs: int = options.get("epochs", 100)
         self.split_data: bool = options.get("split_data", False)
+        self.random_trim: bool = options.get("random_trim", False)
 
         self.lstm_dir: Direction = options.get("lstm_dir", Direction.BI)
         self.use_pretrained_weights: bool = options.get("pretrained_model", True)
@@ -56,6 +59,7 @@ class LSTMModel(nn.Module):
         num_question_types = len(type_mappings["question_types"])
         self.num_event_types = len(type_mappings["event_types"])
         self.question_embeddings = nn.Embedding(num_questions, question_embedding_size)
+        # TODO: get rid of question type embeddings since redundant
         self.question_type_embeddings = nn.Embedding(num_question_types, question_type_embedding_size)
         self.event_type_embeddings = nn.Embedding(self.num_event_types, event_type_embedding_size)
         self.dropout = nn.Dropout(options.dropout)
@@ -69,7 +73,9 @@ class LSTMModel(nn.Module):
             bidirectional=options.lstm_dir in (Direction.BACK, Direction.BI)
         )
         if mode == Mode.PRE_TRAIN:
-            self.output_layer = nn.Linear(hidden_size * (2 if options.lstm_dir == Direction.BI else 1), self.num_event_types)
+            output_size = hidden_size * (2 if options.lstm_dir == Direction.BI else 1)
+            self.event_pred_layer = nn.Linear(output_size, self.num_event_types)
+            self.time_pred_layer = nn.Linear(output_size, 1)
         if mode in (Mode.PREDICT, Mode.CLUSTER):
             output_size = hidden_size * (2 if options.prediction_state in (PredictionState.BOTH_CONCAT, PredictionState.ATTN, PredictionState.AVG) else 1)
             final_layer_size = output_size + (3 + len(ASSISTIVE_EVENT_IDS) if options.engineered_features else 0)
@@ -124,20 +130,27 @@ class LSTMModel(nn.Module):
             else:
                 full_output = forward_output
             full_output *= batch["mask"].unsqueeze(2) # Mask to prevent info leakage at end of sequence before padding
-            predictions = self.output_layer(full_output)
-            # TODO: can mask predictions by only allowing event types that are allowed with corresponding question type
-            event_types_1d = batch["event_types"].view(-1)
-            mask = batch["mask"].view(-1)
 
+            # TODO: can mask predictions by only allowing event types that are allowed with corresponding question type
+            event_predictions = self.event_pred_layer(full_output)
             # Get cross-entropy loss of predictions with labels, note that this automatically performs the softmax step
-            loss_fn = nn.CrossEntropyLoss(reduction="none")
+            event_loss_fn = nn.CrossEntropyLoss(reduction="none")
             # Loss function expects 2d matrix, so compute with all sequences from all batches in single array
-            loss = loss_fn(predictions.view(-1, self.num_event_types), event_types_1d)
-            loss = loss * mask # Don't count loss for indices within the padding of the sequences
+            event_loss = event_loss_fn(event_predictions.view(-1, self.num_event_types), batch["event_types"].view(-1))
+
+            time_predictions = self.time_pred_layer(full_output)
+            # Get cross-entropy loss of time predictions with time interpolation at each step, sigmoid performed implicitly
+            time_loss_fn = nn.BCEWithLogitsLoss(reduction="none")
+            # All sequences unrolled into single array for loss calculation
+            time_loss = time_loss_fn(time_predictions.view(-1), batch["time_ratios"].view(-1))
+
+            # Get final loss
+            loss = event_loss + time_loss
+            loss = loss * batch["mask"].view(-1) # Don't count loss for indices within the padding of the sequences
             avg_loss = loss.mean()
 
             # Get collapsed predictions
-            predicted_event_types = torch.max(predictions, dim=-1)[1].view(-1) # Get indices of max values of predicted event vectors
+            predicted_event_types = torch.max(event_predictions, dim=-1)[1].view(-1) # Get indices of max values of predicted event vectors
 
             return avg_loss, predicted_event_types.detach().cpu().numpy()
 

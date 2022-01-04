@@ -1,5 +1,5 @@
 *.pyc
 models/*
 data/*
-*.csv
-
+src_data/*
+figures/*
