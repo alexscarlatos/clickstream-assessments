@@ -10,6 +10,8 @@ question_type_embedding_size = 32
 event_type_embedding_size = 32
 hidden_size = 64
 
+num_correctness_states = 4
+
 class Mode(Enum):
     PRE_TRAIN = 1
     PREDICT = 2
@@ -35,7 +37,7 @@ class TrainOptions:
         self.lr: float = options.get("lr", 1e-4)
         self.weight_decay: bool = options.get("weight_decay", 1e-6)
         self.epochs: int = options.get("epochs", 100)
-        self.split_data: bool = options.get("split_data", False)
+        self.mixed_time: bool = options.get("mixed_time", False)
         self.random_trim: bool = options.get("random_trim", False)
 
         self.lstm_dir: Direction = options.get("lstm_dir", Direction.BI)
@@ -51,23 +53,23 @@ class TrainOptions:
         self.multi_head: bool = options.get("multi_head", False)
 
 class LSTMModel(nn.Module):
-    def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions):
+    def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions, available_qids: torch.BoolTensor = None):
         super().__init__()
         self.options = options
         self.mode = mode
-        num_questions = len(type_mappings["question_ids"])
-        num_question_types = len(type_mappings["question_types"])
+        self.num_questions = len(type_mappings["question_ids"])
+        self.available_qids = available_qids
+        # num_question_types = len(type_mappings["question_types"])
         self.num_event_types = len(type_mappings["event_types"])
-        self.question_embeddings = nn.Embedding(num_questions, question_embedding_size)
-        # TODO: get rid of question type embeddings since redundant
-        self.question_type_embeddings = nn.Embedding(num_question_types, question_type_embedding_size)
+        self.question_embeddings = nn.Embedding(self.num_questions, question_embedding_size)
+        # Question type gives redundant information when we have question ID
+        # self.question_type_embeddings = nn.Embedding(num_question_types, question_type_embedding_size)
         self.event_type_embeddings = nn.Embedding(self.num_event_types, event_type_embedding_size)
+        self.correctness_embeddings = torch.eye(num_correctness_states).to(device) # One-hot embedding for correctness states
         self.dropout = nn.Dropout(options.dropout)
-        # [question; question type; event type; time delta]
-        # self.input_size = question_type_embedding_size + event_type_embedding_size + 1
-        self.input_size = question_embedding_size + question_type_embedding_size + event_type_embedding_size + 1
+        input_size = question_embedding_size + event_type_embedding_size + num_correctness_states + 1
         self.lstm = nn.LSTM(
-            input_size=self.input_size,
+            input_size=input_size,
             hidden_size=hidden_size,
             batch_first=True,
             bidirectional=options.lstm_dir in (Direction.BACK, Direction.BI)
@@ -76,6 +78,8 @@ class LSTMModel(nn.Module):
             output_size = hidden_size * (2 if options.lstm_dir == Direction.BI else 1)
             self.event_pred_layer = nn.Linear(output_size, self.num_event_types)
             self.time_pred_layer = nn.Linear(output_size, 1)
+            self.qid_pred_layer = nn.Linear(output_size, self.num_questions)
+            self.correctness_pred_layer = nn.Linear(output_size, 3)
         if mode in (Mode.PREDICT, Mode.CLUSTER):
             output_size = hidden_size * (2 if options.prediction_state in (PredictionState.BOTH_CONCAT, PredictionState.ATTN, PredictionState.AVG) else 1)
             final_layer_size = output_size + (3 + len(ASSISTIVE_EVENT_IDS) if options.engineered_features else 0)
@@ -97,15 +101,14 @@ class LSTMModel(nn.Module):
                     nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(final_layer_size, 1))
 
     def forward(self, batch):
-        # import pdb; pdb.set_trace()
         batch_size = batch["event_types"].shape[0]
         questions = self.question_embeddings(batch["question_ids"])
-        question_types = self.question_type_embeddings(batch["question_types"])
+        # question_types = self.question_type_embeddings(batch["question_types"])
         event_types = self.event_type_embeddings(batch["event_types"])
+        correctness = self.correctness_embeddings[batch["correctness"]]
         time_deltas = batch["time_deltas"].unsqueeze(2) # Add a third dimension to be able to concat with embeddings
 
-        # lstm_input = torch.cat([question_types, event_types, time_deltas], dim=-1)
-        lstm_input = torch.cat([questions, question_types, event_types, time_deltas], dim=-1)
+        lstm_input = torch.cat([questions, event_types, correctness, time_deltas], dim=-1)
         # TODO: is this the right condition to not do dropout?
         # if not self.options.freeze_model:
         #     lstm_input = self.dropout(lstm_input)
@@ -125,7 +128,7 @@ class LSTMModel(nn.Module):
                 backward_output = torch.cat([lstm_output[:, 1:, hidden_size:], torch.zeros(batch_size, 1, hidden_size).to(device)], dim=1)
                 if self.options.lstm_dir == Direction.BACK:
                     full_output = backward_output
-                if self.options.lstm_dir == Direction.BI:
+                elif self.options.lstm_dir == Direction.BI:
                     full_output = torch.cat([forward_output, backward_output], dim=2)
             else:
                 full_output = forward_output
@@ -144,15 +147,50 @@ class LSTMModel(nn.Module):
             # All sequences unrolled into single array for loss calculation
             time_loss = time_loss_fn(time_predictions.view(-1), batch["time_ratios"].view(-1))
 
-            # Get final loss
+            # Get event-level prediction loss
             loss = event_loss + time_loss
             loss = loss * batch["mask"].view(-1) # Don't count loss for indices within the padding of the sequences
             avg_loss = loss.mean()
 
-            # Get collapsed predictions
-            predicted_event_types = torch.max(event_predictions, dim=-1)[1].view(-1) # Get indices of max values of predicted event vectors
+            # import pdb; pdb.set_trace()
+            # Visit-level pretraining objectives - predict question id and correctness of each visit to each question
+            # Follows similar process to event-level predictions above, so code is condensed
+            final_idxs = batch["visits"]["idxs"][:, :-1] # The index of the last event in each visit, last index of last visit not used as prediction state so removed
+            # The fwd state at the last index of the first visit is used to predict the second visit, and so on. Left pad since first visit has no preceeding info.
+            fwd_states_at_final_idxs = torch.take_along_dim(lstm_output[:, :, :hidden_size], dim=1, indices=final_idxs.unsqueeze(2))
+            visit_fwd_pred_states = torch.cat([torch.zeros(batch_size, 1, hidden_size).to(device), fwd_states_at_final_idxs], dim=1)
+            if self.options.lstm_dir in (Direction.BACK, Direction.BI):
+                # The back state at the first index of the second visit is used to predict the first visit, and so on. Right pad since last visit has no proceeding info.
+                visit_start_idxs = torch.clamp(final_idxs + 1, max=lstm_output.shape[1] - 1) # Clamp to avoid overflow on last idx, which gets thrown out later anwyay
+                back_states_at_first_idxs = torch.take_along_dim(lstm_output[:, :, hidden_size:], dim=1, indices=visit_start_idxs.unsqueeze(2))
+                # Explicitly mask the back state at the final visit of each sequence to remove noise from index copy above
+                back_states_at_first_idxs *= batch["visits"]["mask"][:, 1:].unsqueeze(2)
+                visit_back_pred_states = torch.cat([back_states_at_first_idxs, torch.zeros(batch_size, 1, hidden_size).to(device)], dim=1)
+                if self.options.lstm_dir == Direction.BACK:
+                    visit_pred_states = visit_back_pred_states
+                elif self.options.lstm_dir == Direction.BI:
+                    visit_pred_states = torch.cat([visit_fwd_pred_states, visit_back_pred_states], dim=2)
+            else:
+                visit_pred_states = visit_fwd_pred_states
+            visit_pred_states *= batch["visits"]["mask"].unsqueeze(2) # Mask out copied states in padded regions
+            qid_predictions = self.qid_pred_layer(visit_pred_states)
+            qid_predictions[:, :, self.available_qids == False] = -torch.inf # Don't assign probability to qids that aren't available
+            qid_loss = nn.CrossEntropyLoss(reduction="none")(qid_predictions.view(-1, self.num_questions), batch["visits"]["qids"].view(-1))
+            correctness_predictions = self.correctness_pred_layer(visit_pred_states)
+            correctness_loss = nn.CrossEntropyLoss(reduction="none")(correctness_predictions.view(-1, 3), batch["visits"]["correctness"].view(-1))
+            visit_loss = qid_loss + correctness_loss
+            visit_loss = visit_loss * batch["visits"]["mask"].view(-1) # Don't count loss for padded regions
+            avg_visit_loss = visit_loss.mean()
 
-            return avg_loss, predicted_event_types.detach().cpu().numpy()
+            # Get final loss
+            final_avg_loss = avg_loss + avg_visit_loss
+
+            # Get collapsed predictions
+            predicted_event_types = torch.max(event_predictions, dim=-1)[1].view(-1).detach().cpu().numpy() # Get indices of max values of predicted event vectors
+            predicted_qids = torch.max(qid_predictions, dim=-1)[1].view(-1).detach().cpu().numpy()
+            predicted_correctness = torch.max(correctness_predictions, dim=-1)[1].view(-1).detach().cpu().numpy()
+
+            return final_avg_loss, (predicted_event_types, predicted_qids, predicted_correctness)
 
         if self.mode in (Mode.PREDICT, Mode.CLUSTER):
             data_class = batch["data_class"]

@@ -5,8 +5,9 @@ import pandas
 from constants import ASSISTIVE_EVENT_IDS, Correctness
 from collections import Counter
 
-def save_type_mappings(data_file):
-    src_data = pandas.read_csv(data_file, sep="\t", encoding="latin-1")
+def save_type_mappings(data_file: str):
+    sep = "," if data_file.endswith(".csv") else "\t"
+    src_data = pandas.read_csv(data_file, sep=sep, encoding="latin-1")
     unique_questions = {question: idx for idx, question in enumerate(src_data["AccessionNumber"].unique())}
     unique_question_types = {question_type: idx for idx, question_type in enumerate(src_data["ItemType"].unique())}
     unique_event_types = {event_type: idx for idx, event_type in enumerate(src_data["Observable"].unique())}
@@ -18,11 +19,20 @@ def save_type_mappings(data_file):
             "event_types": unique_event_types
         }, types_file, indent=4)
 
-def load_type_mappings() -> dict:
+    event_types_per_question = {}
+    for qid in unique_questions:
+        event_types_per_question[qid] = {
+            event_type: idx for idx, event_type in enumerate(src_data[src_data["AccessionNumber"] == qid]["Observable"].unique())
+        }
+
+    with open("ref_data/event_types_per_question.json", "w") as types_file:
+        json.dump(event_types_per_question, types_file, indent=4)
+
+def load_type_mappings() -> Dict[str, Dict[str, int]]:
     with open("ref_data/types.json") as type_mapping_file:
         return json.load(type_mapping_file)
 
-def load_question_info() -> dict:
+def load_question_info() -> Dict[str, dict]:
     with open("ref_data/question_info.json") as qa_file:
         return json.load(qa_file)
 
@@ -163,8 +173,6 @@ class QuestionAnswerState:
         if not self.state:
             return Correctness.INCOMPLETE
 
-        # TODO: for MultipleFillInBlank, FillInBlank, ZonesMS, and CompositeCR, ambiguous whether the solution is incomplete or incorrect in some cases
-
         if self.type == "MCSS":
             return Correctness.CORRECT if self.answer == self.state else Correctness.INCORRECT
 
@@ -241,19 +249,25 @@ def convert_raw_data_to_json(data_filenames: List[str], output_filename: str, bl
     if data_classes:
         assert len(data_classes) == len(data_filenames)
 
-    student_to_sequences: Dict[int, dict] = {}
-    student_to_qa_states: Dict[int, Dict[str, QuestionAnswerState]] = {}
-    student_to_q_visits: Dict[int, Dict[str, List[List[float]]]] = {}
     type_mappings = load_type_mappings()
     qa_key = load_question_info()
+    final_data = []
 
     # Process data set - each sequence is list of events per student
     for file_idx, data_file in enumerate(data_filenames):
         print("Processing", data_file)
-        # TODO: make delimiter a parameter
-        src_data = pandas.read_csv(data_file, parse_dates=["EventTime"], sep="\t", encoding="latin-1").sort_values(["STUDENTID", "EventTime"])
+        student_to_sequences: Dict[int, dict] = {}
+        student_to_qa_states: Dict[int, Dict[str, QuestionAnswerState]] = {}
+        student_to_q_visits: Dict[int, Dict[str, List[List[float]]]] = {}
+
+        sep = "," if data_file.endswith(".csv") else "\t"
+        src_data = pandas.read_csv(data_file, parse_dates=["EventTime"], sep=sep, encoding="latin-1").sort_values(["STUDENTID", "EventTime"])
         for _, event in src_data.iterrows():
             if block and event["Block"] != block:
+                continue
+
+            # This event messes with visit continuity, and also allows QID prediction to cheat
+            if event["Observable"] == "Click Progress Navigator":
                 continue
 
             # Skip entries with no timestamp
@@ -301,13 +315,12 @@ def convert_raw_data_to_json(data_filenames: List[str], output_filename: str, bl
             qid_to_visits = student_to_q_visits.setdefault(event["STUDENTID"], {
                 qid: [] for qid in type_mappings["question_ids"]
             })
-            if event["Observable"] != "Click Progress Navigator": # This event messes with visit continuity
-                q_visits = qid_to_visits[qid]
-                if qid != cur_question_id: # If we went to a new question, start a new visit
-                    q_visits.append([time_delta, time_delta])
-                    cur_question_id = qid
-                else: # Update end time of current visit
-                    q_visits[-1][1] = time_delta
+            q_visits = qid_to_visits[qid]
+            if qid != cur_question_id: # If we went to a new question, start a new visit
+                q_visits.append([time_delta, time_delta])
+                cur_question_id = qid
+            else: # Update current visit
+                q_visits[-1][1] = time_delta # Update current end time
 
             # Append per-event data
             sequence["question_ids"].append(type_mappings["question_ids"][qid])
@@ -316,30 +329,32 @@ def convert_raw_data_to_json(data_filenames: List[str], output_filename: str, bl
             sequence["time_deltas"].append(time_delta)
             sequence["correctness"].append(qa_state.get_correctness_label().value)
 
-    # Final processing based on per-student question data
-    qids_to_track = [qid for qid, q_info in qa_key.items() if (not block or q_info["block"] == block) and q_info["answer"] != "na"]
-    for student_id, seq in student_to_sequences.items():
-        q_stats = seq["q_stats"]
-        for qid in qids_to_track:
-            q_visits = student_to_q_visits[student_id][qid]
-            qa_state = student_to_qa_states[student_id][qid]
-            q_correctness = qa_state.get_correctness_label()
-            q_stats[qid] = {
-                "time": sum(end_time - start_time for start_time, end_time in q_visits),
-                "visits": len(q_visits),
-                "correct": q_correctness.value,
-                "final_state": qa_state.get_state_string()
-            }
+        # Final processing based on per-student question data
+        qids_to_track = [qid for qid, q_info in qa_key.items() if (not block or q_info["block"] == block) and q_info["answer"] != "na"]
+        for student_id, seq in student_to_sequences.items():
+            q_stats = seq["q_stats"]
+            for qid in qids_to_track:
+                q_visits = student_to_q_visits[student_id][qid]
+                qa_state = student_to_qa_states[student_id][qid]
+                q_correctness = qa_state.get_correctness_label()
+                q_stats[qid] = {
+                    "time": sum(end_time - start_time for start_time, end_time in q_visits),
+                    "visits": len(q_visits),
+                    "correct": q_correctness.value,
+                    "final_state": qa_state.get_state_string()
+                }
 
-            if q_correctness == Correctness.CORRECT:
-                block = qa_key[qid]["block"]
-                if block == "A":
-                    seq["block_a_score"] += 1
-                elif block == "B":
-                    seq["block_b_score"] += 1
+                if q_correctness == Correctness.CORRECT:
+                    block = qa_key[qid]["block"]
+                    if block == "A":
+                        seq["block_a_score"] += 1
+                    elif block == "B":
+                        seq["block_b_score"] += 1
+
+        final_data += list(student_to_sequences.values())
 
     with open(output_filename, "w") as output_file:
-        json.dump(list(student_to_sequences.values()), output_file)
+        json.dump(final_data, output_file, indent=2)
 
 def analyze_processed_data(data_filename: str):
     type_mappings = load_type_mappings()
@@ -396,6 +411,14 @@ def gen_score_label(data_filename: str, out_filename: str):
     student_to_label = {seq["student_id"]: seq["block_b_score"] > avg_block_b_score for seq in data}
     with open(out_filename, "w") as out_file:
         json.dump(student_to_label, out_file)
+
+    # Write labels in same format as original label files, for compatibility with PPL code
+    # labels = pandas.read_csv("src_data/data_train_label.csv")
+    # labels["EfficientlyCompletedBlockB"] = [student_to_label[student["STUDENTID"]] for _, student in labels.iterrows()]
+    # labels.to_csv("data_train_label_alt.csv", index=False)
+    # labels = pandas.read_csv("src_data/hidden_label.csv")
+    # labels["EfficientlyCompletedBlockB"] = [student_to_label[student["STUDENTID"]] for _, student in labels.iterrows()]
+    # labels.to_csv("hidden_label_alt.csv", index=False)
 
 def gen_per_q_stat_label(data_filename: str, out_filename: str):
     with open(data_filename) as data_file:

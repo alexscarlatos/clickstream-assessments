@@ -18,7 +18,7 @@
     "VH098753": {"block": "A", "type": "MCSS", "answer": "4"},
     "VH134387": {"block": "A", "type": "FillInBlank", "answer": "60"},
     "VH098783": {"block": "A", "type": "MCSS", "answer": "2"},
-    "BlockRev": {"block": "na", "type": "BlockReview", "answer": "na"},
+    "BlockRev": {"block": "any", "type": "BlockReview", "answer": "na"},
     "VH098812": {"block": "A", "type": "MCSS", "answer": "2"},
     "VH139196": {"block": "A", "type": "CompositeCR", "answer": {
         "A": {
@@ -41,7 +41,7 @@
     "VH098522": {"block": "A", "type": "MCSS", "answer": "4"},
     "VH098779": {"block": "A", "type": "MCSS", "answer": "4"},
     "VH098834": {"block": "A", "type": "MCSS", "answer": "1"},
-    "EOSTimeLft": {"block": "na", "type": "TimeLeftMessage", "answer": "na"},
+    "EOSTimeLft": {"block": "any", "type": "TimeLeftMessage", "answer": "na"},
     "VH356842": {"block": "B", "type": "Directions", "answer": "na"},
     "VH266695": {"block": "B", "type": "MCSS", "answer": "3"},
     "VH304549": {"block": "B", "type": "MatchMS", "answer": [
@@ -107,7 +107,7 @@
     "VH333658": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
     "VH333660": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
     "VH333661": {"block": "Questionnaire", "type": "BQMCSS", "answer": "na"},
-    "HELPMAT8": {"block": "na", "type": "Help", "answer": "na"},
-    "SecTimeOut": {"block": "na", "type": "TimeOutMessage", "answer": "na"},
-    "RaiseHand": {"block": "na", "type": "Dialog", "answer": "na"}
+    "HELPMAT8": {"block": "any", "type": "Help", "answer": "na"},
+    "SecTimeOut": {"block": "any", "type": "TimeOutMessage", "answer": "na"},
+    "RaiseHand": {"block": "any", "type": "Dialog", "answer": "na"}
 }

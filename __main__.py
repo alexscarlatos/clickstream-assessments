@@ -33,7 +33,7 @@ import os
 from data_processing import save_type_mappings, convert_raw_data_to_json, convert_raw_labels_to_json, gen_score_label, gen_per_q_stat_label, analyze_processed_data
 from training import pretrain_and_split_data, train_predictor_and_split_data, test_pretrain, test_predictor, cluster
 from model import TrainOptions, PredictionState, Direction
-from experiments import full_pipeline
+from experiments import full_pipeline, get_ppl_performance
 from utils import initialize_seeds, device
 
 LSTM_DIRS = {
@@ -73,9 +73,10 @@ if __name__ == "__main__":
     parser.add_argument("--task", choices=["comp", "score", "q_stats"])
     parser.add_argument("--test_predictor", help="Validate predictive model", action="store_true")
     parser.add_argument("--full_pipeline", help="Perform cross-validation on pretraining/fine-tuning pipeline", action="store_true")
+    parser.add_argument("--ppl")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight_decay", type=float)
-    parser.add_argument("--split_data", action="store_true")
+    parser.add_argument("--mixed_time", action="store_true")
     parser.add_argument("--random_trim", action="store_true")
     parser.add_argument("--lstm_dir", help="LSTM direction", choices=list(LSTM_DIRS.keys()))
     parser.add_argument("--pretrained_model", type=bool_type)
@@ -129,6 +130,8 @@ if __name__ == "__main__":
     if args.test_predictor:
         test_predictor(args.name, args.data_src, TrainOptions(arg_dict))
     if args.full_pipeline:
-        full_pipeline(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
+        full_pipeline(args.pretrained_name, args.name, TrainOptions(arg_dict))
+    if args.ppl:
+        get_ppl_performance(args.ppl)
     if args.cluster:
         cluster(args.name, args.data_src, TrainOptions(arg_dict))

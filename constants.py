@@ -6,3 +6,4 @@ class Correctness(Enum):
     INCOMPLETE = 0
     INCORRECT = 1
     CORRECT = 2
+    WORKING = 3

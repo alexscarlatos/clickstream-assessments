@@ -1,27 +1,27 @@
 import json
 import time
-from typing import List
+from typing import Dict, List
 import torch
 import numpy as np
 from sklearn import metrics, manifold, decomposition
 import matplotlib.pyplot as plt
-from data_processing import load_type_mappings
+from data_processing import load_type_mappings, load_question_info
 from data_loading import Dataset, Sampler, Collator
 from model import LSTMModel, Mode, TrainOptions
 from baseline import CopyBaseline
 from utils import device
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 
-def get_data(data_filename, partition=None, three_way_split=False):
+def get_data(data_filename: str, partition: float = None, three_way_split: bool = False) -> List[dict]:
     print("Loading data")
     with open(data_filename) as data_file:
-        data = json.load(data_file)
+        data: List[dict] = json.load(data_file)
     data_len = len(data)
 
     if partition:
         if three_way_split:
-            data.sort(key=lambda sequence: sequence["data_class"])
+            data.sort(key=lambda seq: (seq["data_class"], seq["student_id"]))
             res = [[],[]]
             chunk_size = int(data_len / 3)
             for i in range(0, data_len, chunk_size):
@@ -58,6 +58,14 @@ def get_labels(task: str, train: bool):
     with open(label_filename) as label_file:
         return json.load(label_file)
 
+def get_block_a_qids(type_mappings: Dict[str, Dict[str, int]]) -> torch.BoolTensor:
+    question_info = load_question_info()
+    block_a_qids = [False] * len(type_mappings["question_ids"])
+    for q_str, qid in type_mappings["question_ids"].items():
+        if question_info[q_str]["block"] in ("A", "any"):
+            block_a_qids[qid] = True
+    return torch.BoolTensor(block_a_qids)
+
 def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: Mode):
     total_loss = 0
     num_batches = 0
@@ -68,22 +76,40 @@ def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: 
             loss, predictions = model(batch)
             if mode == Mode.PRE_TRAIN:
                 event_types = batch["event_types"].view(-1).detach().cpu().numpy()
+                qids = batch["visits"]["qids"].view(-1).detach().cpu().numpy()
+                correctness = batch["visits"]["correctness"].view(-1).detach().cpu().numpy()
                 mask = batch["mask"].view(-1).detach().cpu().numpy()
-                all_predictions.append(predictions[mask == 1])
-                all_labels.append(event_types[mask == 1])
+                visit_mask = batch["visits"]["mask"].view(-1).detach().cpu().numpy()
+                all_predictions.append([
+                    predictions[0][mask == 1], # events
+                    predictions[1][visit_mask == 1], # qids
+                    predictions[2][visit_mask == 1], # correctness
+                ])
+                all_labels.append([
+                    event_types[mask == 1],
+                    qids[visit_mask == 1],
+                    correctness[visit_mask == 1],
+                ])
             if mode == Mode.PREDICT:
                 all_predictions.append(predictions)
                 all_labels.append(batch["labels"].detach().cpu().numpy())
             total_loss += float(loss.detach().cpu().numpy())
             num_batches += 1
 
-    all_labels_np = np.concatenate(all_labels, axis=0)
-    all_preds_np = np.concatenate(all_predictions, axis=0)
-
     if mode == Mode.PRE_TRAIN:
-        accuracy = metrics.accuracy_score(all_labels_np, all_preds_np)
-        return total_loss / num_batches, accuracy, 0, 0, 0
+        event_preds = np.concatenate([preds[0] for preds in all_predictions])
+        event_labels = np.concatenate([labels[0] for labels in all_labels])
+        event_accuracy = metrics.accuracy_score(event_labels, event_preds)
+        qid_preds = np.concatenate([preds[1] for preds in all_predictions])
+        qid_labels = np.concatenate([labels[1] for labels in all_labels])
+        qid_accuracy = metrics.accuracy_score(qid_labels, qid_preds)
+        correctness_preds = np.concatenate([preds[2] for preds in all_predictions])
+        correctness_labels = np.concatenate([labels[2] for labels in all_labels])
+        correctness_accuracy = metrics.accuracy_score(correctness_labels, correctness_preds)
+        return total_loss / num_batches, event_accuracy, qid_accuracy, correctness_accuracy
     if mode == Mode.PREDICT:
+        all_labels_np = np.concatenate(all_labels, axis=0)
+        all_preds_np = np.concatenate(all_predictions, axis=0)
         # AUC is area under ROC curve, and is calculated on non-collapsed predictions
         auc = metrics.roc_auc_score(all_labels_np, all_preds_np)
         adj_auc = 2 * (auc - .5)
@@ -100,6 +126,7 @@ def train(model, mode: Mode, model_name: str, train_loader, validation_loader, l
     torch.autograd.set_detect_anomaly(True) # Pause exectuion and get stack trace if something weird happens (ex: NaN grads)
     best_metric = None
     best_stats = None
+    cur_stats = None
     best_epoch = 0
     for epoch in range(epochs):
         start_time = time.time()
@@ -115,11 +142,20 @@ def train(model, mode: Mode, model_name: str, train_loader, validation_loader, l
             num_batches += 1
 
         model.eval() # Set model to evaluation mode
-        train_loss, train_accuracy, train_auc, train_kappa, train_agg = evaluate_model(model, train_loader, mode)
-        val_loss, val_accuracy, val_auc, val_kappa, val_agg = evaluate_model(model, validation_loader, mode) if validation_loader else (0, 0, 0, 0, 0)
-        print(f"Epoch: {epoch + 1}, Train Loss: {train_loss:.3f}, Acc: {train_accuracy:.3f}, AUC: {train_auc:.3f}, Kappa: {train_kappa:.3f}, Agg: {train_agg:.3f}, "
-              f"Val Loss: {val_loss:.3f}, Acc: {val_accuracy:.3f}, AUC: {val_auc:.3f}, Kappa: {val_kappa:.3f}, Agg: {val_agg:.3f}, "
-              f"Time: {time.time() - start_time:.2f}")
+        if mode == Mode.PRE_TRAIN:
+            train_loss, train_evt_acc, train_qid_acc, train_crct_acc = evaluate_model(model, train_loader, mode)
+            val_loss, val_evt_acc, val_qid_acc, val_crct_acc = evaluate_model(model, validation_loader, mode) if validation_loader else (0, 0, 0, 0)
+            cur_stats = [epoch, val_loss, val_evt_acc, val_qid_acc, val_crct_acc]
+            print(f"Epoch: {epoch + 1}, Train Loss: {train_loss:.3f}, Accuracy: Event: {train_evt_acc:.3f}, QID: {train_qid_acc:.3f}, Correctness: {train_crct_acc:.3f}, "
+                f"Val Loss: {val_loss:.3f}, Accuracy: Event: {val_evt_acc:.3f}, QID: {val_qid_acc:.3f}, Correctness: {val_crct_acc:.3f}, "
+                f"Time: {time.time() - start_time:.2f}")
+        if mode == Mode.PREDICT:
+            train_loss, train_accuracy, train_auc, train_kappa, train_agg = evaluate_model(model, train_loader, mode)
+            val_loss, val_accuracy, val_auc, val_kappa, val_agg = evaluate_model(model, validation_loader, mode) if validation_loader else (0, 0, 0, 0, 0)
+            cur_stats = [epoch, val_loss, val_accuracy, val_auc, val_kappa, val_agg]
+            print(f"Epoch: {epoch + 1}, Train Loss: {train_loss:.3f}, Acc: {train_accuracy:.3f}, AUC: {train_auc:.3f}, Kappa: {train_kappa:.3f}, Agg: {train_agg:.3f}, "
+                f"Val Loss: {val_loss:.3f}, Acc: {val_accuracy:.3f}, AUC: {val_auc:.3f}, Kappa: {val_kappa:.3f}, Agg: {val_agg:.3f}, "
+                f"Time: {time.time() - start_time:.2f}")
 
         # Save model for best validation metric
         # if not best_metric or (val_agg > best_metric if mode == Mode.PREDICT else val_loss < best_metric):
@@ -127,7 +163,7 @@ def train(model, mode: Mode, model_name: str, train_loader, validation_loader, l
             # best_metric = val_agg if mode == Mode.PREDICT else val_loss
             best_metric = val_loss
             best_epoch = epoch
-            best_stats = [epoch, val_loss, val_accuracy, val_auc, val_kappa, val_agg]
+            best_stats = cur_stats
             print("Saving model")
             torch.save(model.state_dict(), f"{model_name}.pt")
 
@@ -144,26 +180,27 @@ def pretrain_and_split_data(model_name: str, data_file: str, options: TrainOptio
 
 def pretrain(model_name: str, train_data: List[dict], val_data: List[dict], options: TrainOptions):
     train_loader = torch.utils.data.DataLoader(
-        Dataset(train_data),
+        Dataset(train_data, Mode.PRE_TRAIN),
         collate_fn=Collator(options.random_trim),
         batch_size=BATCH_SIZE,
         shuffle=True,
         drop_last=True
     )
     validation_loader = torch.utils.data.DataLoader(
-        Dataset(val_data),
+        Dataset(val_data, Mode.PRE_TRAIN),
         collate_fn=Collator(),
         batch_size=len(val_data)
     ) if val_data is not None else None
 
-    model = LSTMModel(Mode.PRE_TRAIN, load_type_mappings(), options).to(device)
+    type_mappings = load_type_mappings()
+    model = LSTMModel(Mode.PRE_TRAIN, type_mappings, options, available_qids=get_block_a_qids(type_mappings)).to(device)
     train(model, Mode.PRE_TRAIN, model_name, train_loader, validation_loader, lr=options.lr, weight_decay=options.weight_decay, epochs=options.epochs, patience=10)
 
 def test_pretrain(model_name: str, data_file: str, options: TrainOptions):
     # Load test data
     test_data = get_data(data_file or "data/test_data.json")
     test_loader = torch.utils.data.DataLoader(
-        Dataset(test_data),
+        Dataset(test_data, Mode.PRE_TRAIN),
         collate_fn=Collator(),
         batch_size=len(test_data)
     )
@@ -171,44 +208,45 @@ def test_pretrain(model_name: str, data_file: str, options: TrainOptions):
     # Load model
     model_type = "lstm"
     if model_type == "lstm":
-        model = LSTMModel(Mode.PRE_TRAIN, load_type_mappings(), options).to(device)
+        type_mappings = load_type_mappings()
+        model = LSTMModel(Mode.PRE_TRAIN, type_mappings, options, available_qids=get_block_a_qids(type_mappings)).to(device)
         model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
         model.eval()
     elif model_type == "baseline":
         model = CopyBaseline()
 
     # Test model
-    loss, accuracy, _, _, _ = evaluate_model(model, test_loader, Mode.PRE_TRAIN)
-    print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}")
+    loss, event_accuracy, qid_accuracy, correctness_accuracy = evaluate_model(model, test_loader, Mode.PRE_TRAIN)
+    print(f"Loss: {loss:.3f}, Accuracy: Events: {event_accuracy:.3f}, QIDs: {qid_accuracy:.3f}, Correctness: {correctness_accuracy:.3f}")
 
 def train_predictor_and_split_data(pretrain_model_name: str, model_name: str, data_file: str, options: TrainOptions):
-    train_data, val_data = get_data(data_file or "data/train_data.json", .8, options.split_data)
+    train_data, val_data = get_data(data_file or "data/train_data.json", .8, options.mixed_time)
     train_labels = get_labels(options.task, True)
     return train_predictor(pretrain_model_name, model_name, train_data, val_data, train_labels, options)
 
 def train_predictor(pretrain_model_name: str, model_name: str, train_data: List[dict], val_data: List[dict], labels: dict, options: TrainOptions):
-    # train_chunk_sizes = [int(len(train_data) / 3)] * 3 if options.split_data else [len(train_data)]
-    # val_chunk_sizes = ([int(len(val_data) / 3)] * 3 if options.split_data else [len(val_data)]) if val_data else None
+    train_chunk_sizes = [int(len(train_data) / 3)] * 3 if options.mixed_time else [len(train_data)]
+    val_chunk_sizes = ([int(len(val_data) / 3)] * 3 if options.mixed_time else [len(val_data)]) if val_data is not None else None
     train_loader = torch.utils.data.DataLoader(
-        Dataset(train_data, labels, options.engineered_features),
-        collate_fn=Collator(options.random_trim),
-        # batch_sampler=Sampler(train_chunk_sizes, BATCH_SIZE)
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        drop_last=True
+        Dataset(train_data, Mode.PREDICT, labels, options.engineered_features),
+        collate_fn=Collator(),
+        batch_sampler=Sampler(train_chunk_sizes, BATCH_SIZE)
+        # batch_size=BATCH_SIZE,
+        # shuffle=True,
+        # drop_last=True
     )
     validation_loader = torch.utils.data.DataLoader(
-        Dataset(val_data, labels, options.engineered_features),
+        Dataset(val_data, Mode.PREDICT, labels, options.engineered_features),
         collate_fn=Collator(),
-        # batch_sampler=Sampler(val_chunk_sizes)
-        batch_size=len(val_data)
+        batch_sampler=Sampler(val_chunk_sizes)
+        # batch_size=len(val_data)
     ) if val_data is not None else None
     model = LSTMModel(Mode.PREDICT, load_type_mappings(), options)
 
     # Copy pretrained parameters based on settings
     states_to_copy = []
     if options.use_pretrained_embeddings:
-        states_to_copy += ["question_embeddings", "question_type_embeddings", "event_type_embeddings"]
+        states_to_copy += ["question_embeddings", "event_type_embeddings"]
     if options.use_pretrained_weights:
         states_to_copy += ["lstm"]
     if options.use_pretrained_head:
@@ -226,7 +264,7 @@ def train_predictor(pretrain_model_name: str, model_name: str, train_data: List[
     # Freeze parameters based on settings
     components_to_freeze = []
     if options.freeze_embeddings:
-        components_to_freeze += [model.question_embeddings, model.question_type_embeddings, model.event_type_embeddings]
+        components_to_freeze += [model.question_embeddings, model.event_type_embeddings]
     if options.freeze_model:
         components_to_freeze += [model.lstm]
     for component in components_to_freeze:
@@ -240,12 +278,12 @@ def test_predictor(model_name: str, data_file: str, options: TrainOptions):
     # Load test data
     test_data = get_data(data_file or "data/test_data.json")
     chunk_sizes = [len([seq for seq in test_data if seq["data_class"] == data_class]) for data_class in ["10", "20", "30"]]
-    chunk_sizes = [chunk_size for chunk_size in chunk_sizes if chunk_size]
+    chunk_sizes = [chunk_size for chunk_size in chunk_sizes if chunk_size] # Filter out empty chunks
     test_loader = torch.utils.data.DataLoader(
-        Dataset(test_data, get_labels(options.task, False), options.engineered_features),
+        Dataset(test_data, Mode.PREDICT, get_labels(options.task, False), options.engineered_features),
         collate_fn=Collator(),
-        # batch_sampler=Sampler(chunk_sizes)
-        batch_size=len(test_data)
+        batch_sampler=Sampler(chunk_sizes)
+        # batch_size=len(test_data)
     )
 
     # Load model
@@ -266,7 +304,7 @@ def cluster(model_name: str, data_file: str, options: TrainOptions):
     # Load data
     data = get_data(data_file or "data/train_data.json")
     data_loader = torch.utils.data.DataLoader(
-        Dataset(data, get_labels(options.task, True)),
+        Dataset(data, Mode.CLUSTER, get_labels(options.task, True)),
         collate_fn=Collator(),
         batch_size=len(data),
         shuffle=True,
