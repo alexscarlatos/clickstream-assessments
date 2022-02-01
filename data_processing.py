@@ -20,10 +20,10 @@ def save_type_mappings(data_file: str):
         }, types_file, indent=4)
 
     event_types_per_question = {}
-    for qid in unique_questions:
-        event_types_per_question[qid] = {
-            event_type: idx for idx, event_type in enumerate(src_data[src_data["AccessionNumber"] == qid]["Observable"].unique())
-        }
+    for qid_str, qid in unique_questions.items():
+        event_types_per_question[qid] = [
+            unique_event_types[event_type] for event_type in src_data[src_data["AccessionNumber"] == qid_str]["Observable"].unique()
+        ]
 
     with open("ref_data/event_types_per_question.json", "w") as types_file:
         json.dump(event_types_per_question, types_file, indent=4)
@@ -32,9 +32,20 @@ def load_type_mappings() -> Dict[str, Dict[str, int]]:
     with open("ref_data/types.json") as type_mapping_file:
         return json.load(type_mapping_file)
 
+def load_event_types_per_question() -> Dict[str, List[int]]:
+    with open("ref_data/event_types_per_question.json") as types_file:
+        return json.load(types_file)
+
 def load_question_info() -> Dict[str, dict]:
     with open("ref_data/question_info.json") as qa_file:
         return json.load(qa_file)
+
+def get_problem_qids(block: str, type_mappings: dict):
+    q_info_dict = load_question_info()
+    return [
+        (qid_str, type_mappings["question_ids"][qid_str])
+        for qid_str, q_info in q_info_dict.items() if q_info["block"] == block and q_info["answer"] != "na"
+    ]
 
 mcss_re = re.compile("^VH.{6}_(\d+)")
 gridms_re = re.compile("^VH.{6}-(\d+)-(\d+):(checked|unchecked)")
@@ -424,15 +435,12 @@ def gen_per_q_stat_label(data_filename: str, out_filename: str):
     with open(data_filename) as data_file:
         data = json.load(data_file)
 
-    q_info_dict = load_question_info()
-    block_b_qids = [qid for qid, q_info in sorted(q_info_dict.items(), key=lambda question: question[0]) if q_info["block"] == "B" and q_info["answer"] != "na"]
+    type_mappings = load_type_mappings()
+    block_b_qids = [qid_str for qid_str, _ in get_problem_qids("B", type_mappings)]
 
     # Label is correctness and time spent for each question in block B
     student_to_label = {
-        seq["student_id"]: [
-            [seq["q_stats"][qid]["correct"] for qid in block_b_qids],
-            [seq["q_stats"][qid]["time"] for qid in block_b_qids]
-        ]
+        seq["student_id"]: [seq["q_stats"][qid]["correct"] == Correctness.CORRECT.value for qid in block_b_qids]
         for seq in data
     }
     with open(out_filename, "w") as out_file:

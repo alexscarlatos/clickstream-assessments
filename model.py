@@ -2,7 +2,7 @@ from typing import Dict
 from enum import Enum
 import torch
 from torch import nn
-from constants import ASSISTIVE_EVENT_IDS
+from constants import Mode, Direction, PredictionState, TrainOptions, ASSISTIVE_EVENT_IDS
 from utils import device
 
 question_embedding_size = 32
@@ -12,48 +12,8 @@ hidden_size = 64
 
 num_correctness_states = 4
 
-class Mode(Enum):
-    PRE_TRAIN = 1
-    PREDICT = 2
-    CLUSTER = 3
-
-class Direction(Enum):
-    FWD = 1
-    BACK = 2
-    BI = 3
-
-class PredictionState(Enum):
-    LAST = 1
-    FIRST = 2
-    BOTH_SUM = 3
-    BOTH_CONCAT = 4
-    AVG = 5
-    ATTN = 6
-
-class TrainOptions:
-    def __init__(self, options: dict):
-        self.task: str = options.get("task", "comp")
-
-        self.lr: float = options.get("lr", 1e-4)
-        self.weight_decay: bool = options.get("weight_decay", 1e-6)
-        self.epochs: int = options.get("epochs", 100)
-        self.mixed_time: bool = options.get("mixed_time", False)
-        self.random_trim: bool = options.get("random_trim", False)
-
-        self.lstm_dir: Direction = options.get("lstm_dir", Direction.BI)
-        self.use_pretrained_weights: bool = options.get("pretrained_model", True)
-        self.use_pretrained_embeddings: bool = options.get("pretrained_emb", True)
-        self.use_pretrained_head: bool = options.get("pretrained_head", False)
-        self.freeze_model: bool = options.get("freeze_model", True)
-        self.freeze_embeddings: bool = options.get("freeze_emb", True)
-        self.prediction_state: PredictionState = options.get("pred_state", PredictionState.BOTH_CONCAT)
-        self.dropout: float = options.get("dropout", 0.25)
-        self.hidden_ff_layer: bool = options.get("hidden_ff_layer", False)
-        self.engineered_features: bool = options.get("eng_feat", False)
-        self.multi_head: bool = options.get("multi_head", False)
-
 class LSTMModel(nn.Module):
-    def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions, available_qids: torch.BoolTensor = None):
+    def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions, available_qids: torch.BoolTensor = None, num_labels: int = 1):
         super().__init__()
         self.options = options
         self.mode = mode
@@ -66,8 +26,11 @@ class LSTMModel(nn.Module):
         # self.question_type_embeddings = nn.Embedding(num_question_types, question_type_embedding_size)
         self.event_type_embeddings = nn.Embedding(self.num_event_types, event_type_embedding_size)
         self.correctness_embeddings = torch.eye(num_correctness_states).to(device) # One-hot embedding for correctness states
-        self.dropout = nn.Dropout(options.dropout)
-        input_size = question_embedding_size + event_type_embedding_size + num_correctness_states + 1
+        self.use_correctness = options.use_correctness
+        if self.use_correctness:
+            input_size = question_embedding_size + event_type_embedding_size + num_correctness_states + 1
+        else:
+            input_size = question_embedding_size + event_type_embedding_size + 1
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -81,8 +44,9 @@ class LSTMModel(nn.Module):
             self.qid_pred_layer = nn.Linear(output_size, self.num_questions)
             self.correctness_pred_layer = nn.Linear(output_size, 3)
         if mode in (Mode.PREDICT, Mode.CLUSTER):
+            self.num_labels = num_labels
             output_size = hidden_size * (2 if options.prediction_state in (PredictionState.BOTH_CONCAT, PredictionState.ATTN, PredictionState.AVG) else 1)
-            final_layer_size = output_size + (3 + len(ASSISTIVE_EVENT_IDS) if options.engineered_features else 0)
+            final_layer_size = output_size + (7 + len(ASSISTIVE_EVENT_IDS) if options.engineered_features else 0)
             if options.multi_head:
                 self.attention = nn.ModuleDict()
                 self.hidden_layers = nn.ModuleDict()
@@ -92,13 +56,13 @@ class LSTMModel(nn.Module):
                     self.hidden_layers[data_class] = nn.Sequential(
                         nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(output_size, output_size))
                     self.pred_output_layer[data_class] = nn.Sequential(
-                        nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(final_layer_size, 1))
+                        nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(final_layer_size, num_labels))
             else:
                 self.attention = nn.Linear(output_size, 1)
                 self.hidden_layers = nn.Sequential(
                     nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(output_size, output_size))
                 self.pred_output_layer = nn.Sequential(
-                    nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(final_layer_size, 1))
+                    nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(final_layer_size, num_labels))
 
     def forward(self, batch):
         batch_size = batch["event_types"].shape[0]
@@ -108,11 +72,10 @@ class LSTMModel(nn.Module):
         correctness = self.correctness_embeddings[batch["correctness"]]
         time_deltas = batch["time_deltas"].unsqueeze(2) # Add a third dimension to be able to concat with embeddings
 
-        lstm_input = torch.cat([questions, event_types, correctness, time_deltas], dim=-1)
-        # TODO: is this the right condition to not do dropout?
-        # if not self.options.freeze_model:
-        #     lstm_input = self.dropout(lstm_input)
-
+        if self.use_correctness:
+            lstm_input = torch.cat([questions, event_types, correctness, time_deltas], dim=-1)
+        else:
+            lstm_input = torch.cat([questions, event_types, time_deltas], dim=-1)
         packed_lstm_input = torch.nn.utils.rnn.pack_padded_sequence(
             lstm_input, lengths=batch["sequence_lengths"], batch_first=True, enforce_sorted=False)
         packed_lstm_output, (hidden, _) = self.lstm(packed_lstm_input)
@@ -177,8 +140,11 @@ class LSTMModel(nn.Module):
             qid_predictions[:, :, self.available_qids == False] = -torch.inf # Don't assign probability to qids that aren't available
             qid_loss = nn.CrossEntropyLoss(reduction="none")(qid_predictions.view(-1, self.num_questions), batch["visits"]["qids"].view(-1))
             correctness_predictions = self.correctness_pred_layer(visit_pred_states)
-            correctness_loss = nn.CrossEntropyLoss(reduction="none")(correctness_predictions.view(-1, 3), batch["visits"]["correctness"].view(-1))
-            visit_loss = qid_loss + correctness_loss
+            if self.use_correctness:
+                correctness_loss = nn.CrossEntropyLoss(reduction="none")(correctness_predictions.view(-1, 3), batch["visits"]["correctness"].view(-1))
+                visit_loss = qid_loss + correctness_loss
+            else:
+                visit_loss = qid_loss
             visit_loss = visit_loss * batch["visits"]["mask"].view(-1) # Don't count loss for padded regions
             avg_visit_loss = visit_loss.mean()
 
@@ -193,6 +159,7 @@ class LSTMModel(nn.Module):
             return final_avg_loss, (predicted_event_types, predicted_qids, predicted_correctness)
 
         if self.mode in (Mode.PREDICT, Mode.CLUSTER):
+            # import pdb; pdb.set_trace()
             data_class = batch["data_class"]
             attention = self.attention[data_class] if self.options.multi_head else self.attention
             hidden_layers = self.hidden_layers[data_class] if self.options.multi_head else self.hidden_layers
@@ -231,7 +198,11 @@ class LSTMModel(nn.Module):
             # Append engineered features to latent state if needed (note that we don't want this )
             if self.options.engineered_features:
                 pred_state = torch.cat([pred_state, batch["engineered_features"]], dim=1)
-            predictions = pred_output_layer(pred_state).view(-1)
+            predictions = pred_output_layer(pred_state)
+            if self.num_labels == 1:
+                predictions = predictions.view(-1)
+            else:
+                predictions = predictions.view(-1, self.num_labels)
 
             if self.mode == Mode.PREDICT:
                 # Get cross entropy loss of predictions with labels, note that this automatically performs the sigmoid step

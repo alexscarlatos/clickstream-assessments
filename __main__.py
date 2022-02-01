@@ -10,10 +10,6 @@ The classifier will be a linear layer with softmax that predicts an event type.
 
 Pretraining Enhancements:
  - Use [0,1] normalized timestamps?
- - New objectives:
-    - Predict next question (only at events where question is actually changing)
-    - Predict correctness
- - Split into per-question streams and capture switching between questions
  - Expand ExtendedInfo into new events (checked vs. unchecked)
  - Restrict event predictions to those possible for associated question types
  - Feed question-level info into model
@@ -23,7 +19,6 @@ Pretraining Enhancements:
     - Masked language modeling alternative to LSTMs
 
 Training Enhancements:
-  - Add score to engineered features
   - Visualize attention and analyze
 '''
 
@@ -31,10 +26,13 @@ import argparse
 import json
 import os
 from data_processing import save_type_mappings, convert_raw_data_to_json, convert_raw_labels_to_json, gen_score_label, gen_per_q_stat_label, analyze_processed_data
-from training import pretrain_and_split_data, train_predictor_and_split_data, test_pretrain, test_predictor, cluster
-from model import TrainOptions, PredictionState, Direction
+from training import (
+    pretrain_and_split_data, train_predictor_and_split_data, train_ckt_encoder_and_split_data, train_ckt_predictor_and_split_data,
+    test_pretrain, test_predictor, test_ckt_encoder, test_ckt_predictor, cluster
+)
 from experiments import full_pipeline, get_ppl_performance
 from utils import initialize_seeds, device
+from constants import TrainOptions, PredictionState, Direction
 
 LSTM_DIRS = {
     "fwd": Direction.FWD,
@@ -72,10 +70,13 @@ if __name__ == "__main__":
     parser.add_argument("--train", help="Train the LSTM predictor", action="store_true")
     parser.add_argument("--task", choices=["comp", "score", "q_stats"])
     parser.add_argument("--test_predictor", help="Validate predictive model", action="store_true")
+    parser.add_argument("--ckt", help="Use CKT models for operations", action="store_true")
+    parser.add_argument("--ckt_concat_visits", help="Concatenate visits by QID for CKT encoding", type=bool_type)
     parser.add_argument("--full_pipeline", help="Perform cross-validation on pretraining/fine-tuning pipeline", action="store_true")
     parser.add_argument("--ppl")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight_decay", type=float)
+    parser.add_argument("--epochs", type=int)
     parser.add_argument("--mixed_time", action="store_true")
     parser.add_argument("--random_trim", action="store_true")
     parser.add_argument("--lstm_dir", help="LSTM direction", choices=list(LSTM_DIRS.keys()))
@@ -90,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("--eng_feat", type=bool_type)
     parser.add_argument("--multi_head", type=bool_type)
     parser.add_argument("--cluster", action="store_true")
+    parser.add_argument("--use_correctness", type=bool_type)
     args = parser.parse_args()
 
     if os.path.isfile("default.json"):
@@ -122,15 +124,27 @@ if __name__ == "__main__":
         elif args.task == "q_stats":
             gen_per_q_stat_label(args.labels, args.out)
     if args.pretrain:
-        pretrain_and_split_data(args.name, args.data_src, TrainOptions(arg_dict))
+        if args.ckt:
+            train_ckt_encoder_and_split_data(args.name, args.data_src, TrainOptions(arg_dict))
+        else:
+            pretrain_and_split_data(args.name, args.data_src, TrainOptions(arg_dict))
     if args.test_pretrain:
-        test_pretrain(args.name, args.data_src, TrainOptions(arg_dict))
+        if args.ckt:
+            test_ckt_encoder(args.name, args.data_src, TrainOptions(arg_dict))
+        else:
+            test_pretrain(args.name, args.data_src, TrainOptions(arg_dict))
     if args.train:
-        train_predictor_and_split_data(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
+        if args.ckt:
+            train_ckt_predictor_and_split_data(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
+        else:
+            train_predictor_and_split_data(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
     if args.test_predictor:
-        test_predictor(args.name, args.data_src, TrainOptions(arg_dict))
+        if args.ckt:
+            test_ckt_predictor(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
+        else:
+            test_predictor(args.name, args.data_src, TrainOptions(arg_dict))
     if args.full_pipeline:
-        full_pipeline(args.pretrained_name, args.name, TrainOptions(arg_dict))
+        full_pipeline(args.pretrained_name, args.name, args.ckt, TrainOptions(arg_dict))
     if args.ppl:
         get_ppl_performance(args.ppl)
     if args.cluster:

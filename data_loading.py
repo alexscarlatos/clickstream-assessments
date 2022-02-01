@@ -2,8 +2,7 @@ from typing import Dict, List, Optional
 import random
 import torch
 import numpy as np
-from model import Mode
-from constants import Correctness
+from constants import Correctness, Mode
 from utils import device
 
 def add_engineered_features(sequence):
@@ -57,14 +56,18 @@ def add_time_ratios(sequence):
     # For timestep t, previous timestep t1 and following timestep t2, ratio = (t - t1)/(t2 - t1)
     # Value does not exist for events 0 and M, so use values 0 and 1 respectively
     td = np.array(sequence["time_deltas"])
-    time_steps = td[1:] - td[:-1]
-    time_spans = td[2:] - td[:-2]
-    time_spans[time_spans == 0] = 1 # Sometimes we have the same timestamp for multiple events, so avoid division by 0
-    ratio = time_steps[:-1] / time_spans
-    sequence["time_ratios"] = np.concatenate([[0], ratio, [1]])
+    if len(td) == 1:
+        # TODO: deal with data issue, example is VH098810 and HELPMAT8 for student 2333126380
+        sequence["time_ratios"] = np.array([0])
+    else:
+        time_steps = td[1:] - td[:-1]
+        time_spans = td[2:] - td[:-2]
+        time_spans[time_spans == 0] = 1 # Sometimes we have the same timestamp for multiple events, so avoid division by 0
+        ratio = time_steps[:-1] / time_spans
+        sequence["time_ratios"] = np.concatenate([[0], ratio, [1]])
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, data: List[Dict[str, list]], mode: Mode, labels: Dict[str, bool] = None, engineered_features: bool = False):
+    def __init__(self, data: List[Dict[str, list]], mode: Mode, labels: Dict[str, bool] = None, bin_labels: bool = True, engineered_features: bool = False):
         self.data = data
 
         total_positive = 0
@@ -75,14 +78,14 @@ class Dataset(torch.utils.data.Dataset):
                 add_engineered_features(sequence)
 
             if labels:
-                sequence["label"] = 1 if labels[str(sequence["student_id"])] else 0
-                total_positive += sequence["label"]
+                sequence["label"] = labels[str(sequence["student_id"])]
+                if bin_labels:
+                    total_positive += 1 if sequence["label"] else 0
 
             if mode == Mode.PRE_TRAIN:
                 add_time_ratios(sequence)
 
-        print(f"Data size: {len(self.data)}")
-        if labels:
+        if labels and bin_labels:
             print(f"Positive rate: {total_positive / len(self.data):.3f}")
 
     def __len__(self):
@@ -126,6 +129,7 @@ class Sampler(torch.utils.data.Sampler):
     def __len__(self):
         return self.len
 
+
 class Collator:
     def __init__(self, random_trim=False):
         self.random_trim = random_trim
@@ -152,7 +156,7 @@ class Collator:
 
         for sequence in batch:
             time_deltas = torch.FloatTensor(sequence["time_deltas"])
-            if len(time_deltas) < 2: # A single-event sequence messes with time_deltas calculations, so is unusable
+            if len(time_deltas) < 2: # A single-event sequence messes with time_ratios calculations, so is unusable
                 print(f"Skipping student {sequence['student_id']}, sequence has length {len(time_deltas)}")
                 continue
             time_mask = time_deltas <= trim_at if self.random_trim else torch.ones(time_deltas.shape[0]).type(torch.bool)
