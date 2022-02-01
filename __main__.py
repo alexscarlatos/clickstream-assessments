@@ -1,27 +1,3 @@
-'''
-Data flow:
-The RNN input will be a single question, which is a list of event vectors.
-Note: we might actually want each clickstream to be the full clickstream for a student, rather than for a student's question - should experiment with both.
-We can pad the question lists so the RNN can have consistent lengths.
-We will have a list of these question clickstreams, taken across students.
-So the shape of the data is num_questions x longest_question_stream x event_vector_size.
-Then we'll feed the data into the RNN in batches, and then RNN will have to feed into a classifier.
-The classifier will be a linear layer with softmax that predicts an event type.
-
-Pretraining Enhancements:
- - Use [0,1] normalized timestamps?
- - Expand ExtendedInfo into new events (checked vs. unchecked)
- - Restrict event predictions to those possible for associated question types
- - Feed question-level info into model
- - Get ideas from NAEP test https://nces.ed.gov/nationsreportcard/nqt/
-
- - Stretches:
-    - Masked language modeling alternative to LSTMs
-
-Training Enhancements:
-  - Visualize attention and analyze
-'''
-
 import argparse
 import json
 import os
