@@ -361,14 +361,14 @@ def train_ckt_encoder(model_name: str, train_data: List[dict], val_data: List[di
     for qid_str, qid in get_problem_qids("A", type_mappings):
         print(f"----- {qid_str} ------")
         train_loader = torch.utils.data.DataLoader(
-            CKTEncoderDataset(train_data, qid, options.ckt_concat_visits),
+            CKTEncoderDataset(train_data, qid, options.concat_visits),
             collate_fn=CKTEncoderCollator(),
             batch_size=BATCH_SIZE,
             shuffle=True,
             drop_last=True
         )
         validation_loader = torch.utils.data.DataLoader(
-            CKTEncoderDataset(val_data, qid, options.ckt_concat_visits),
+            CKTEncoderDataset(val_data, qid, options.concat_visits),
             collate_fn=CKTEncoderCollator(),
             batch_size=BATCH_SIZE
         ) if val_data is not None else None
@@ -384,7 +384,7 @@ def test_ckt_encoder(model_name: str, data_file: str, options: TrainOptions):
     for qid_str, qid in get_problem_qids("A", type_mappings):
         print(f"----- {qid_str} ------")
         test_loader = torch.utils.data.DataLoader(
-            CKTEncoderDataset(test_data, qid, options.ckt_concat_visits),
+            CKTEncoderDataset(test_data, qid, options.concat_visits),
             collate_fn=CKTEncoderCollator(),
             batch_size=BATCH_SIZE
         )
@@ -421,21 +421,21 @@ def train_ckt_predictor(encoder_model_name: str, model_name: str, train_data: Li
     # Load data
     qid_set = {qid for _, qid in block_a_qids}
     train_loader = torch.utils.data.DataLoader(
-        CKTPredictorDataset(train_data, ckt_encoders, labels, qid_set, options.ckt_concat_visits),
+        CKTPredictorDataset(train_data, ckt_encoders, labels, qid_set, options.concat_visits),
         collate_fn=CKTPredictorCollator(),
         batch_size=BATCH_SIZE,
         shuffle=True,
         drop_last=True
     )
     val_loader = torch.utils.data.DataLoader(
-        CKTPredictorDataset(val_data, ckt_encoders, labels, qid_set, options.ckt_concat_visits),
+        CKTPredictorDataset(val_data, ckt_encoders, labels, qid_set, options.concat_visits),
         collate_fn=CKTPredictorCollator(),
         batch_size=BATCH_SIZE
     )
 
     # Create and train model
     num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
-    model = CKTPredictor(options.ckt_concat_visits, num_labels, type_mappings, block_a_qids).to(device)
+    model = CKTPredictor(options.concat_visits, num_labels, type_mappings, block_a_qids).to(device)
     return train(model, Mode.PREDICT, model_name, train_loader, val_loader, options.lr, options.weight_decay, options.epochs)
 
 def test_ckt_predictor(encoder_model_name: str, model_name: str, data_file: str, options: TrainOptions):
@@ -451,14 +451,14 @@ def test_ckt_predictor_with_data(encoder_model_name: str, model_name: str, test_
     labels = get_labels(options.task, False)
     qid_set = {qid for _, qid in block_a_qids}
     test_loader = torch.utils.data.DataLoader(
-        CKTPredictorDataset(test_data, ckt_encoders, labels, qid_set, options.ckt_concat_visits),
+        CKTPredictorDataset(test_data, ckt_encoders, labels, qid_set, options.concat_visits),
         collate_fn=CKTPredictorCollator(),
         batch_size=BATCH_SIZE
     )
 
     # Load model
     num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
-    model = CKTPredictor(options.ckt_concat_visits, num_labels, type_mappings, block_a_qids).to(device)
+    model = CKTPredictor(options.concat_visits, num_labels, type_mappings, block_a_qids).to(device)
     model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
     model.eval()
 
@@ -489,6 +489,8 @@ def cluster(model_name: str, data_file: str, options: TrainOptions):
             latent_states = latent_states.detach().cpu().numpy()
             predictions = predictions.detach().cpu().numpy()
             labels = batch["labels"].detach().cpu().numpy()
+
+    # TODO: after doing PCA, only visualize random subset of students
 
     # Represent latent states in 2D space
     print("Performing Dimension Reduction")

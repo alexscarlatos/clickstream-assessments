@@ -1,47 +1,14 @@
 from typing import Dict, List
 import torch
-import numpy as np
 from ckt_model import encoding_size
-from data_loading import add_visit_level_features_and_correctness
+from data_loading import get_sub_sequences
 from utils import device
-
-def get_sub_sequences(sequence, question_ids: set, concat_visits = False):
-    # Split a sequence into a list of subsequences by visit
-    add_visit_level_features_and_correctness(sequence)
-    start_idx = 0
-    sub_sequences = []
-    for last_idx in sequence["visits"]["idxs"]:
-        qid = sequence["question_ids"][start_idx]
-        if qid in question_ids:
-            sub_sequence = {
-                "student_id": sequence["student_id"],
-                "question_id": qid,
-                "event_types": sequence["event_types"][start_idx : last_idx + 1],
-                # Convert to log2 as per CKT paper, add 1 to avoid log(0)
-                "time_deltas": np.log2(np.array(sequence["time_deltas"][start_idx : last_idx + 1]) + 1)
-            }
-            sub_sequences.append(sub_sequence)
-        start_idx = last_idx + 1
-
-    # If requested, concatenate visits per qid
-    if concat_visits:
-        qid_to_sub_sequences = {}
-        for sub_seq in sub_sequences:
-            if sub_seq["question_id"] not in qid_to_sub_sequences:
-                qid_to_sub_sequences[sub_seq["question_id"]] = sub_seq
-            else:
-                qid_sub_seqs = qid_to_sub_sequences[sub_seq["question_id"]]
-                qid_sub_seqs["event_types"] += sub_seq["event_types"]
-                qid_sub_seqs["time_deltas"] = np.concatenate([qid_sub_seqs["time_deltas"], sub_seq["time_deltas"]])
-        sub_sequences = list(qid_to_sub_sequences.values())
-
-    return sub_sequences
 
 class CKTEncoderDataset(torch.utils.data.Dataset):
     def __init__(self, data: List[Dict[str, list]], question_id: int, concat_visits: bool):
         self.data = []
         for sequence in data:
-            self.data += get_sub_sequences(sequence, {question_id}, concat_visits)
+            self.data += get_sub_sequences(sequence, question_ids={question_id}, concat_visits=concat_visits)
 
     def __len__(self):
         return len(self.data)
@@ -79,7 +46,7 @@ class CKTPredictorDataset(torch.utils.data.Dataset):
             for sequence in data:
                 encodings = []
                 question_ids = []
-                sub_seqs = get_sub_sequences(sequence, allowed_qids, concat_visits)
+                sub_seqs = get_sub_sequences(sequence, question_ids=allowed_qids, concat_visits=concat_visits)
                 if concat_visits: # Ensure order with concat_visits since encodings will be fed through linear NN layer
                     sub_seqs.sort(key=lambda sub_seq: sub_seq["question_id"])
                 for sub_seq in sub_seqs:

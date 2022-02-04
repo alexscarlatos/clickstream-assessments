@@ -8,12 +8,14 @@ from collections import Counter
 def save_type_mappings(data_file: str):
     sep = "," if data_file.endswith(".csv") else "\t"
     src_data = pandas.read_csv(data_file, sep=sep, encoding="latin-1")
+    unique_students = {int(student): idx for idx, student in enumerate(src_data["STUDENTID"].unique())}
     unique_questions = {question: idx for idx, question in enumerate(src_data["AccessionNumber"].unique())}
     unique_question_types = {question_type: idx for idx, question_type in enumerate(src_data["ItemType"].unique())}
     unique_event_types = {event_type: idx for idx, event_type in enumerate(src_data["Observable"].unique())}
 
     with open("ref_data/types.json", "w") as types_file:
         json.dump({
+            "student_ids": unique_students,
             "question_ids": unique_questions,
             "question_types": unique_question_types,
             "event_types": unique_event_types
@@ -392,7 +394,7 @@ def analyze_processed_data(data_filename: str):
     # Show top responses and correctness for each question
     for qid, qa_counter in qid_to_answers.items():
         print(f"---- {qid} ({100 * qid_to_num_correct[qid] / len(top_students):.0f}% correct) ----")
-        for count in qa_counter.most_common(5):
+        for count in qa_counter.most_common():
             print(count)
         print("")
 

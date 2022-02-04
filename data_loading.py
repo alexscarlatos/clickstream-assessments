@@ -23,8 +23,10 @@ def add_engineered_features(sequence):
     ]
 
 def add_visit_level_features_and_correctness(sequence):
-    # Calculate visits - the last event of each visit to a question, the index, question id, correctness, and timestamp
-    # Also refine sequence-level correctness
+    """
+    Calculate visits - for the last event of each visit to a question - the index, question id, correctness, and timestamp
+    Additionally, apply WORKING correctness state to all events that are not the last in a visit
+    """
 
     seq_len = len(sequence["question_ids"])
     visits = sequence["visits"] = {
@@ -65,6 +67,41 @@ def add_time_ratios(sequence):
         time_spans[time_spans == 0] = 1 # Sometimes we have the same timestamp for multiple events, so avoid division by 0
         ratio = time_steps[:-1] / time_spans
         sequence["time_ratios"] = np.concatenate([[0], ratio, [1]])
+
+def get_sub_sequences(sequence, question_ids: set = None, concat_visits = False):
+    # Split a sequence into a list of subsequences by visit
+    add_visit_level_features_and_correctness(sequence)
+    start_idx = 0
+    sub_sequences = []
+    for last_idx in sequence["visits"]["idxs"]:
+        qid = sequence["question_ids"][start_idx]
+        if not question_ids or qid in question_ids:
+            sub_sequence = {
+                "student_id": sequence["student_id"],
+                "question_id": qid,
+                "event_types": sequence["event_types"][start_idx : last_idx + 1],
+                # Convert to log2 as per CKT paper, add 1 to avoid log(0)
+                # TODO: option for how to treat time_deltas, and to add time_ratios
+                "time_deltas": np.log2(np.array(sequence["time_deltas"][start_idx : last_idx + 1]) + 1),
+                "correct": sequence["correctness"][last_idx] == Correctness.CORRECT.value
+            }
+            sub_sequences.append(sub_sequence)
+        start_idx = last_idx + 1
+
+    # If requested, concatenate visits per qid
+    if concat_visits:
+        qid_to_sub_sequences = {}
+        for sub_seq in sub_sequences:
+            if sub_seq["question_id"] not in qid_to_sub_sequences:
+                qid_to_sub_sequences[sub_seq["question_id"]] = sub_seq
+            else:
+                qid_sub_seqs = qid_to_sub_sequences[sub_seq["question_id"]]
+                qid_sub_seqs["event_types"] += sub_seq["event_types"]
+                qid_sub_seqs["time_deltas"] = np.concatenate([qid_sub_seqs["time_deltas"], sub_seq["time_deltas"]])
+                qid_sub_seqs["correct"] = sub_seq["correct"] # Take correctness of most recent visit
+        sub_sequences = list(qid_to_sub_sequences.values())
+
+    return sub_sequences
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data: List[Dict[str, list]], mode: Mode, labels: Dict[str, bool] = None, bin_labels: bool = True, engineered_features: bool = False):

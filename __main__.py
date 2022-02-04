@@ -9,6 +9,7 @@ from training import (
 from experiments import full_pipeline, get_ppl_performance
 from utils import initialize_seeds, device
 from constants import TrainOptions, PredictionState, Direction
+from irt.irt_training import irt, test_irt
 
 LSTM_DIRS = {
     "fwd": Direction.FWD,
@@ -47,9 +48,11 @@ if __name__ == "__main__":
     parser.add_argument("--task", choices=["comp", "score", "q_stats"])
     parser.add_argument("--test_predictor", help="Validate predictive model", action="store_true")
     parser.add_argument("--ckt", help="Use CKT models for operations", action="store_true")
-    parser.add_argument("--ckt_concat_visits", help="Concatenate visits by QID for CKT encoding", type=bool_type)
+    parser.add_argument("--concat_visits", help="Concatenate visits by QID for per-question encoding", type=bool_type)
     parser.add_argument("--full_pipeline", help="Perform cross-validation on pretraining/fine-tuning pipeline", action="store_true")
     parser.add_argument("--ppl")
+    parser.add_argument("--irt", help="Train IRT model", action="store_true")
+    parser.add_argument("--test_irt", action="store_true")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight_decay", type=float)
     parser.add_argument("--epochs", type=int)
@@ -125,3 +128,7 @@ if __name__ == "__main__":
         get_ppl_performance(args.ppl)
     if args.cluster:
         cluster(args.name, args.data_src, TrainOptions(arg_dict))
+    if args.irt:
+        irt(args.name, args.data_src, TrainOptions(arg_dict))
+    if args.test_irt:
+        test_irt(args.name, args.data_src, TrainOptions(arg_dict))

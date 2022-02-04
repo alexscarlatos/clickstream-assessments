@@ -30,7 +30,7 @@ class TrainOptions:
         self.epochs: int = options.get("epochs", 100)
         self.mixed_time: bool = options.get("mixed_time", False)
         self.random_trim: bool = options.get("random_trim", False)
-        self.ckt_concat_visits: bool = options.get("ckt_concat_visits", True)
+        self.concat_visits: bool = options.get("concat_visits", True)
 
         self.lstm_dir: Direction = options.get("lstm_dir", Direction.BI)
         self.use_pretrained_weights: bool = options.get("pretrained_model", True)
