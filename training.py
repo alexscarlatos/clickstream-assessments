@@ -1,6 +1,10 @@
+from gc import freeze
 import json
+from math import ceil
+import random
 import time
 from typing import Dict, List
+from matplotlib.colors import ListedColormap
 import torch
 import numpy as np
 from sklearn import metrics, manifold, decomposition
@@ -12,7 +16,7 @@ from model import LSTMModel
 from ckt_model import CKTEncoder, CKTPredictor
 from baseline import CopyBaseline
 from utils import device
-from constants import Mode, TrainOptions
+from constants import Mode, TrainOptions, Correctness
 
 BATCH_SIZE = 64
 
@@ -42,7 +46,7 @@ def get_data(data_filename: str, partition: float = None, three_way_split: bool 
         print(f"Data loaded; Train size: {len(res[0])}, Val size: {len(res[1])}")
         return res
     else:
-        print(f"Data size: {len(data)}")
+        print(f"Data size: {data_len}")
         return data
 
 def get_labels(task: str, train: bool):
@@ -94,20 +98,23 @@ def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: 
         for batch in validation_loader:
             loss, predictions = model(batch)
             if mode == Mode.PRE_TRAIN:
+                has_qids = predictions[1] is not None
+                has_correctness = predictions[2] is not None
                 event_types = batch["event_types"].view(-1).detach().cpu().numpy()
-                qids = batch["visits"]["qids"].view(-1).detach().cpu().numpy()
-                correctness = batch["visits"]["correctness"].view(-1).detach().cpu().numpy()
+                qids = batch["visits"]["qids"].view(-1).detach().cpu().numpy() if has_qids else None
+                correctness = batch["visits"]["correctness"].view(-1).detach().cpu().numpy() if has_correctness else None
                 mask = batch["mask"].view(-1).detach().cpu().numpy()
-                visit_mask = batch["visits"]["mask"].view(-1).detach().cpu().numpy()
+                visit_mask = batch["visits"]["mask"].view(-1).detach().cpu().numpy() if has_qids or has_correctness else None
+
                 all_predictions.append([
                     predictions[0][mask == 1], # events
-                    predictions[1][visit_mask == 1], # qids
-                    predictions[2][visit_mask == 1], # correctness
+                    predictions[1][visit_mask == 1] if has_qids else [], # qids
+                    predictions[2][visit_mask == 1] if has_correctness else [], # correctness
                 ])
                 all_labels.append([
                     event_types[mask == 1],
-                    qids[visit_mask == 1],
-                    correctness[visit_mask == 1],
+                    qids[visit_mask == 1] if has_qids else [],
+                    correctness[visit_mask == 1] if has_correctness else [],
                 ])
             if mode == Mode.CKT_ENCODE:
                 event_types = batch["event_types"].view(-1).detach().cpu().numpy()
@@ -126,10 +133,10 @@ def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: 
         event_accuracy = metrics.accuracy_score(event_labels, event_preds)
         qid_preds = np.concatenate([preds[1] for preds in all_predictions])
         qid_labels = np.concatenate([labels[1] for labels in all_labels])
-        qid_accuracy = metrics.accuracy_score(qid_labels, qid_preds)
+        qid_accuracy = metrics.accuracy_score(qid_labels, qid_preds) if qid_preds.size else 0
         correctness_preds = np.concatenate([preds[2] for preds in all_predictions])
         correctness_labels = np.concatenate([labels[2] for labels in all_labels])
-        correctness_accuracy = metrics.accuracy_score(correctness_labels, correctness_preds)
+        correctness_accuracy = metrics.accuracy_score(correctness_labels, correctness_preds) if correctness_preds.size else 0
         return total_loss / num_batches, event_accuracy, qid_accuracy, correctness_accuracy
     if mode == Mode.CKT_ENCODE:
         event_preds = np.concatenate(all_predictions, axis=0)
@@ -222,15 +229,16 @@ def pretrain_and_split_data(model_name: str, data_file: str, options: TrainOptio
     return pretrain(model_name, train_data, val_data, options)
 
 def pretrain(model_name: str, train_data: List[dict], val_data: List[dict], options: TrainOptions):
+    type_mappings = load_type_mappings()
     train_loader = torch.utils.data.DataLoader(
-        Dataset(train_data, Mode.PRE_TRAIN),
+        Dataset(train_data, type_mappings, time_ratios=True),
         collate_fn=Collator(options.random_trim),
         batch_size=BATCH_SIZE,
         shuffle=True,
         drop_last=True
     )
     validation_loader = torch.utils.data.DataLoader(
-        Dataset(val_data, Mode.PRE_TRAIN),
+        Dataset(val_data, type_mappings, time_ratios=True),
         collate_fn=Collator(),
         batch_size=len(val_data)
     ) if val_data is not None else None
@@ -240,10 +248,11 @@ def pretrain(model_name: str, train_data: List[dict], val_data: List[dict], opti
     train(model, Mode.PRE_TRAIN, model_name, train_loader, validation_loader, lr=options.lr, weight_decay=options.weight_decay, epochs=options.epochs, patience=10)
 
 def test_pretrain(model_name: str, data_file: str, options: TrainOptions):
+    type_mappings = load_type_mappings()
     # Load test data
     test_data = get_data(data_file or "data/test_data.json")
     test_loader = torch.utils.data.DataLoader(
-        Dataset(test_data, Mode.PRE_TRAIN),
+        Dataset(test_data, type_mappings, time_ratios=True),
         collate_fn=Collator(),
         batch_size=len(test_data)
     )
@@ -262,32 +271,8 @@ def test_pretrain(model_name: str, data_file: str, options: TrainOptions):
     loss, event_accuracy, qid_accuracy, correctness_accuracy = evaluate_model(model, test_loader, Mode.PRE_TRAIN)
     print(f"Loss: {loss:.3f}, Accuracy: Events: {event_accuracy:.3f}, QIDs: {qid_accuracy:.3f}, Correctness: {correctness_accuracy:.3f}")
 
-def train_predictor_and_split_data(pretrain_model_name: str, model_name: str, data_file: str, options: TrainOptions):
-    train_data, val_data = get_data(data_file or "data/train_data.json", .8, options.mixed_time)
-    train_labels = get_labels(options.task, True)
-    return train_predictor(pretrain_model_name, model_name, train_data, val_data, train_labels, options)
-
-def train_predictor(pretrain_model_name: str, model_name: str, train_data: List[dict], val_data: List[dict], labels: dict, options: TrainOptions):
-    type_mappings = load_type_mappings()
-    train_chunk_sizes = [int(len(train_data) / 3)] * 3 if options.mixed_time else [len(train_data)]
-    val_chunk_sizes = ([int(len(val_data) / 3)] * 3 if options.mixed_time else [len(val_data)]) if val_data is not None else None
-    bin_task = options.task in ("comp", "score")
-    train_loader = torch.utils.data.DataLoader(
-        Dataset(train_data, Mode.PREDICT, labels, bin_labels=bin_task, engineered_features=options.engineered_features),
-        collate_fn=Collator(),
-        batch_sampler=Sampler(train_chunk_sizes, BATCH_SIZE)
-        # batch_size=BATCH_SIZE,
-        # shuffle=True,
-        # drop_last=True
-    )
-    validation_loader = torch.utils.data.DataLoader(
-        Dataset(val_data, Mode.PREDICT, labels, bin_labels=bin_task, engineered_features=options.engineered_features),
-        collate_fn=Collator(),
-        batch_sampler=Sampler(val_chunk_sizes)
-        # batch_size=len(val_data)
-    ) if val_data is not None else None
-    num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
-    model = LSTMModel(Mode.PREDICT, type_mappings, options, num_labels=num_labels)
+def create_predictor_model(pretrain_model_name: str, mode: Mode, type_mappings: dict, options: TrainOptions, num_labels: int = 1):
+    model = LSTMModel(mode, type_mappings, options, num_labels=num_labels)
 
     # Copy pretrained parameters based on settings
     states_to_copy = []
@@ -318,6 +303,34 @@ def train_predictor(pretrain_model_name: str, model_name: str, train_data: List[
             param.requires_grad = False
 
     model = model.to(device)
+    return model
+
+def train_predictor_and_split_data(pretrain_model_name: str, model_name: str, data_file: str, options: TrainOptions):
+    train_data, val_data = get_data(data_file or "data/train_data.json", .8, options.mixed_time)
+    train_labels = get_labels(options.task, True)
+    return train_predictor(pretrain_model_name, model_name, train_data, val_data, train_labels, options)
+
+def train_predictor(pretrain_model_name: str, model_name: str, train_data: List[dict], val_data: List[dict], labels: dict, options: TrainOptions):
+    type_mappings = load_type_mappings()
+    train_chunk_sizes = [int(len(train_data) / 3)] * 3 if options.mixed_time else [len(train_data)]
+    val_chunk_sizes = ([int(len(val_data) / 3)] * 3 if options.mixed_time else [len(val_data)]) if val_data is not None else None
+    train_loader = torch.utils.data.DataLoader(
+        Dataset(train_data, type_mappings, labels=labels, engineered_features=options.engineered_features),
+        collate_fn=Collator(),
+        batch_sampler=Sampler(train_chunk_sizes, BATCH_SIZE)
+        # batch_size=BATCH_SIZE,
+        # shuffle=True,
+        # drop_last=True
+    )
+    validation_loader = torch.utils.data.DataLoader(
+        Dataset(val_data,type_mappings, labels=labels, engineered_features=options.engineered_features),
+        collate_fn=Collator(),
+        batch_sampler=Sampler(val_chunk_sizes)
+        # batch_size=len(val_data)
+    ) if val_data is not None else None
+
+    num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
+    model = create_predictor_model(pretrain_model_name, Mode.PREDICT, type_mappings, options, num_labels=num_labels)
     return train(model, Mode.PREDICT, model_name, train_loader, validation_loader, lr=options.lr, weight_decay=options.weight_decay, epochs=options.epochs, patience=15)
 
 def test_predictor(model_name: str, data_file: str, options: TrainOptions):
@@ -329,9 +342,8 @@ def test_predictor_with_data(model_name: str, test_data: List[dict], options: Tr
     # Load test data
     chunk_sizes = [len([seq for seq in test_data if seq["data_class"] == data_class]) for data_class in ["10", "20", "30"]]
     chunk_sizes = [chunk_size for chunk_size in chunk_sizes if chunk_size] # Filter out empty chunks
-    bin_task = options.task in ("comp", "score")
     test_loader = torch.utils.data.DataLoader(
-        Dataset(test_data, Mode.PREDICT, get_labels(options.task, False), bin_labels=bin_task, engineered_features=options.engineered_features),
+        Dataset(test_data, type_mappings, labels=get_labels(options.task, False), engineered_features=options.engineered_features),
         collate_fn=Collator(),
         batch_sampler=Sampler(chunk_sizes)
     )
@@ -467,11 +479,16 @@ def test_ckt_predictor_with_data(encoder_model_name: str, model_name: str, test_
     print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
     return [loss, accuracy, auc, kappa, aggregated]
 
+# TODO: move to its own file
+
 def cluster(model_name: str, data_file: str, options: TrainOptions):
+    type_mappings = load_type_mappings()
+
     # Load data
     data = get_data(data_file or "data/train_data.json")
+    data = [seq for seq in data if max(seq["time_deltas"]) < 2000] # Remove time outliers
     data_loader = torch.utils.data.DataLoader(
-        Dataset(data, Mode.CLUSTER, get_labels(options.task, True)),
+        Dataset(data, type_mappings, labels=get_labels(options.task, True)),
         collate_fn=Collator(),
         batch_size=len(data)
     )
@@ -488,22 +505,68 @@ def cluster(model_name: str, data_file: str, options: TrainOptions):
             latent_states, predictions = model(batch)
             latent_states = latent_states.detach().cpu().numpy()
             predictions = predictions.detach().cpu().numpy()
+            predictions[predictions > 0] = 1
+            predictions[predictions < 0] = 0
             labels = batch["labels"].detach().cpu().numpy()
-
-    # TODO: after doing PCA, only visualize random subset of students
 
     # Represent latent states in 2D space
     print("Performing Dimension Reduction")
-    transformer = decomposition.PCA(2)
+    algo = "tsne"
+    if algo == "pca":
+        transformer = decomposition.PCA(2)
+    elif algo == "mds":
+        transformer = manifold.MDS(2)
+    elif algo == "tsne":
+        transformer = manifold.TSNE(2, perplexity=15, learning_rate="auto", n_iter=1000, init="pca", random_state=221)
     reduced_states = transformer.fit_transform(latent_states)
-    true_states = reduced_states[labels == 1]
-    false_states = reduced_states[labels == 0]
-    plt.plot(true_states[:,0], true_states[:,1], 'bo', label="NAEP EDM Label = 1")
-    plt.plot(false_states[:,0], false_states[:,1], 'ro', label="NAEP EDM Label = 0")
-    # true_states = reduced_states[predictions > 0]
-    # false_states = reduced_states[predictions <= 0]
-    # plt.plot(true_states[:,0], true_states[:,1], 'bo', label="NAEP EDM Prediction = 1")
-    # plt.plot(false_states[:,0], false_states[:,1], 'ro', label="NAEP EDM Prediction = 0")
-    plt.title("Dimension-Reduced Latent State Vectors")
-    plt.legend()
+
+    # Randomly downsample rendered points to reduce clutter
+    print("Downsampling")
+    sample_rate = 1
+    sample_idxs = random.sample(range(len(reduced_states)), int(sample_rate * len(reduced_states)))
+    data = np.array(data)[sample_idxs]
+    reduced_states = reduced_states[sample_idxs]
+    labels = labels[sample_idxs]
+    predictions = predictions[sample_idxs]
+
+    # Define the plots to be shown
+    bin_cmap = ListedColormap(["red", "blue"])
+    num_visited_questions = [len([qs for qs in seq["q_stats"].values() if qs["visits"]]) for seq in data]
+    plots = [
+        ("Label", bin_cmap, labels), # Good
+        # ("Prediction", bin_cmap, predictions), # Good
+        ("Block A Score", "viridis", [seq["block_a_score"] for seq in data]), # Good
+        ("Num Events", "viridis", [len(seq["event_types"]) for seq in data]), # Good
+        ("Questions Attempted", "viridis", [sum(qs["correct"] != Correctness.INCOMPLETE.value for qs in seq["q_stats"].values()) for seq in data]), # Good
+        # ("Questions Visited", "viridis", num_visited_questions), # Very similar to questions attempted
+        ("Total Time", "viridis", [min(max(seq["time_deltas"]), 1800) for seq in data]), # Good
+        # ("Avg. Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) / len([qs for qs in seq["q_stats"].values() if qs["visits"]]) for seq in data]), # Not Great
+        # ("Num Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) for seq in data]), # Not Great
+        # ("Avg. Time Spent", "viridis", [
+        #     min(
+        #         sum(qs["time"] for qs in seq["q_stats"].values()) / num_visited_questions[seq_idx],
+        #         1800 / num_visited_questions[seq_idx] # Min since some sequences have messed up timestamps and we don't want outliers
+        #     )
+        #     for seq_idx, seq in enumerate(data)
+        # ]), # Not Great
+        # ("Std. Time Spent", "viridis", [np.array([qs["time"] for qs in seq["q_stats"].values()]).std() for seq in data]), # Not Great
+    ]
+
+    # Register the plots based on their definitions
+    num_cols = 2
+    num_rows = ceil(len(plots) / num_cols)
+    fig, axes = plt.subplots(num_rows, num_cols)
+    fig.suptitle("Dimension-Reduced Latent State Vectors")
+    for plot_idx, (title, cmap, c_vec) in enumerate(plots):
+        ax = axes[plot_idx] if num_rows == 1 else axes[plot_idx // num_cols, plot_idx % num_cols]
+        scatter = ax.scatter(reduced_states[:,0], reduced_states[:,1], c=c_vec, cmap=cmap, picker=True, pickradius=5)
+        ax.legend(*scatter.legend_elements(), loc='center left', bbox_to_anchor=(1, 0.5), title=title)
+
+    # Define click handler - print information associated with clicked point
+    def onpick(event):
+        ind = event.ind
+        print(data[ind])
+    fig.canvas.mpl_connect('pick_event', onpick)
+
+    # Render the plots
     plt.show()

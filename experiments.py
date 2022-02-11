@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pandas
 from sklearn.model_selection import StratifiedKFold
@@ -135,13 +136,17 @@ def get_ppl_performance(output_filename: str):
     Get performance metrics from output of PPL submission to NAEP Competition
     """
     data = pandas.read_csv(output_filename)
-    labels = data["EfficientlyCompletedBlockB"]
-    preds = data["prob"]
-    auc = roc_auc_score(labels, preds)
-    adj_auc = 2 * (auc - .5)
-    preds[preds < .5] = 0
-    preds[preds >= .5] = 1
-    accuracy = accuracy_score(labels, preds)
-    kappa = cohen_kappa_score(labels, preds)
-    agg = adj_auc + kappa
-    print(f"Accuracy: {accuracy:.3f}, Adj. AUC: {adj_auc:.3f}, Kappa: {kappa:.3f}, Agg: {agg:.3f}")
+    for test_filename in ["data/test_data_10.json", "data/test_data_20.json", "data/test_data_30.json"]:
+        with open(test_filename) as test_file:
+            student_ids = {seq["student_id"] for seq in json.load(test_file)}
+        idx = data["STUDENTID"].isin(student_ids)
+        labels = data["EfficientlyCompletedBlockB"][idx]
+        preds = data["prob"][idx]
+        auc = roc_auc_score(labels, preds)
+        adj_auc = 2 * (auc - .5)
+        preds[preds < .5] = 0
+        preds[preds >= .5] = 1
+        accuracy = accuracy_score(labels, preds)
+        kappa = cohen_kappa_score(labels, preds)
+        agg = adj_auc + kappa
+        print(f"Accuracy: {accuracy:.3f}, Adj. AUC: {adj_auc:.3f}, Kappa: {kappa:.3f}, Agg: {agg:.3f}")

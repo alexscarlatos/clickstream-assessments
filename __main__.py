@@ -71,6 +71,7 @@ if __name__ == "__main__":
     parser.add_argument("--multi_head", type=bool_type)
     parser.add_argument("--cluster", action="store_true")
     parser.add_argument("--use_correctness", type=bool_type)
+    parser.add_argument("--use_visit_pt_objs", type=bool_type)
     args = parser.parse_args()
 
     if os.path.isfile("default.json"):
@@ -129,6 +130,6 @@ if __name__ == "__main__":
     if args.cluster:
         cluster(args.name, args.data_src, TrainOptions(arg_dict))
     if args.irt:
-        irt(args.name, args.data_src, TrainOptions(arg_dict))
+        irt(args.pretrained_name, args.name, args.data_src, args.ckt, TrainOptions(arg_dict))
     if args.test_irt:
-        test_irt(args.name, args.data_src, TrainOptions(arg_dict))
+        test_irt(args.name, args.data_src, args.ckt, TrainOptions(arg_dict))

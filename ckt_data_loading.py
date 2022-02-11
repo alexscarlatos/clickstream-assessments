@@ -1,13 +1,14 @@
 from typing import Dict, List
 import torch
 from ckt_model import encoding_size
-from data_loading import get_sub_sequences
+from data_loading import get_sub_sequences, add_visit_level_features_and_correctness
 from utils import device
 
 class CKTEncoderDataset(torch.utils.data.Dataset):
     def __init__(self, data: List[Dict[str, list]], question_id: int, concat_visits: bool):
         self.data = []
         for sequence in data:
+            add_visit_level_features_and_correctness(sequence)
             self.data += get_sub_sequences(sequence, question_ids={question_id}, concat_visits=concat_visits)
 
     def __len__(self):
@@ -46,6 +47,7 @@ class CKTPredictorDataset(torch.utils.data.Dataset):
             for sequence in data:
                 encodings = []
                 question_ids = []
+                add_visit_level_features_and_correctness(sequence)
                 sub_seqs = get_sub_sequences(sequence, question_ids=allowed_qids, concat_visits=concat_visits)
                 if concat_visits: # Ensure order with concat_visits since encodings will be fed through linear NN layer
                     sub_seqs.sort(key=lambda sub_seq: sub_seq["question_id"])

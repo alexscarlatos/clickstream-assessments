@@ -53,6 +53,7 @@ mcss_re = re.compile("^VH.{6}_(\d+)")
 gridms_re = re.compile("^VH.{6}-(\d+)-(\d+):(checked|unchecked)")
 zonesms_re = re.compile("^VH.{6}-(\d+):(checked|unchecked)")
 compcr_cc_re = re.compile("^VH.{6}(.)-(\d+)?:(checked|unchecked)")
+non_num_re = re.compile("[^\d\./]")
 
 def code_to_char(code: str):
     if code.startswith("Digit"):
@@ -65,6 +66,12 @@ def code_to_char(code: str):
         return "/"
     # There are many more codes, but none are included in any of the correct answers
     return ""
+
+def fill_in_blank_correct(answer, response):
+    if isinstance(answer, list):
+        return response in answer or non_num_re.sub('', response) in answer
+    else:
+        return response == answer or non_num_re.sub('', response) == answer
 
 class QuestionAnswerState:
     def __init__(self, qid, answer_key):
@@ -202,17 +209,11 @@ class QuestionAnswerState:
                 return Correctness.INCOMPLETE
             correct = True
             for part, answer in self.answer.items():
-                if isinstance(answer, list):
-                    correct = correct and self.state[part] in answer
-                else:
-                    correct = correct and self.state[part] == answer
+                correct = correct and fill_in_blank_correct(answer, self.state[part])
             return Correctness.CORRECT if correct else Correctness.INCORRECT
 
         if self.type == "FillInBlank":
-            if isinstance(self.answer, list):
-                return Correctness.CORRECT if self.state in self.answer else Correctness.INCORRECT
-            else:
-                return Correctness.CORRECT if self.answer == self.state else Correctness.INCORRECT
+            return Correctness.CORRECT if fill_in_blank_correct(self.answer, self.state) else Correctness.INCORRECT
 
         if self.type == "CompositeCR":
             if len(self.state) != len(self.answer):
@@ -222,20 +223,14 @@ class QuestionAnswerState:
             for part in self.answer:
                 response, answer, part_type = self.state[part], self.answer[part]["answer"], self.answer[part]["type"]
                 if part_type == "FillInBlank":
-                    if isinstance(answer, list):
-                        correct = correct and response in answer
-                    else:
-                        correct = correct and response == answer
+                    correct = correct and fill_in_blank_correct(answer, response)
 
                 elif part_type == "MultipleFillInBlank":
                     if len(response) != len(answer):
                         return Correctness.INCOMPLETE
 
                     for subpart, subpart_answer in answer.items():
-                        if isinstance(subpart_answer, list):
-                            correct = correct and response[subpart] in subpart_answer
-                        else:
-                            correct = correct and response[subpart] == subpart_answer
+                        correct = correct and fill_in_blank_correct(subpart_answer, response[subpart])
 
                 elif part_type == "MCSS":
                     correct = correct and response == answer
@@ -384,7 +379,7 @@ def analyze_processed_data(data_filename: str):
     # Look at answers for top students
     qid_to_answers: Dict[str, Counter] = {qid: Counter() for qid in type_mappings["question_ids"]}
     qid_to_num_correct: Dict[str, int] = {qid: 0 for qid in type_mappings["question_ids"]}
-    top_students = sorted(data, key=lambda seq: -seq["block_b_score"])[:100]
+    top_students = sorted(data, key=lambda seq: -seq["block_a_score"])[:100]
     for seq in top_students:
         for qid, q_stats in seq["q_stats"].items():
             qid_to_answers[qid][q_stats["final_state"]] += 1
@@ -423,7 +418,7 @@ def gen_score_label(data_filename: str, out_filename: str):
     avg_block_b_score = total_block_b_score / len(data)
     student_to_label = {seq["student_id"]: seq["block_b_score"] > avg_block_b_score for seq in data}
     with open(out_filename, "w") as out_file:
-        json.dump(student_to_label, out_file)
+        json.dump(student_to_label, out_file, indent=2)
 
     # Write labels in same format as original label files, for compatibility with PPL code
     # labels = pandas.read_csv("src_data/data_train_label.csv")
@@ -446,4 +441,4 @@ def gen_per_q_stat_label(data_filename: str, out_filename: str):
         for seq in data
     }
     with open(out_filename, "w") as out_file:
-        json.dump(student_to_label, out_file)
+        json.dump(student_to_label, out_file, indent=2)

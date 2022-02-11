@@ -2,6 +2,7 @@ from typing import Dict
 import torch
 from torch import nn
 from utils import device
+from constants import Mode
 
 # TODO: way to restructure for fine-tuning
 # single model class, where encoder/decoder params are param dicts from question id
@@ -72,7 +73,7 @@ class CKTEncoder(nn.Module):
 
 class CKTPredictor(nn.Module):
     """
-    Given a full set of CKTEncoders, train a multi-class predictor on top of their outputs
+    Train a multi-class predictor on top of encoded sequences
     """
 
     mlp_hidden_size = 100
@@ -122,3 +123,20 @@ class CKTPredictor(nn.Module):
             predictions = predictions.view(-1, self.num_labels)
         avg_loss = nn.BCEWithLogitsLoss(reduction="mean")(predictions, batch["labels"])
         return avg_loss, predictions.detach().cpu().numpy()
+
+class CKTJoint(nn.Module):
+    """
+    A CKT-based encoder that represents all questions
+    """
+
+    mlp_hidden_size = 100
+    rnn_hidden_size = 100
+
+    def __init__(self, mode: Mode):
+        super().__init__()
+        self.mode = mode
+        # TODO: (maybe, worth it?) have single encoder/decoder model that processes all questions, can append ont-hot qid to encoded vector for reconstruction
+        # TODO: then, have map of qid to separate encoder/decoders, what we'll do is use the batch_sampler from before to send only one qid per batch
+
+    def forward(self, batch):
+        pass

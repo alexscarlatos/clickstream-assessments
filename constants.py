@@ -7,6 +7,7 @@ class Mode(Enum):
     PREDICT = 2
     CLUSTER = 3
     CKT_ENCODE = 4
+    IRT = 5
 
 class Direction(Enum):
     FWD = 1
@@ -44,6 +45,7 @@ class TrainOptions:
         self.engineered_features: bool = options.get("eng_feat", False)
         self.multi_head: bool = options.get("multi_head", False)
         self.use_correctness: bool = options.get("use_correctness", True)
+        self.use_visit_pt_objs: bool = options.get("use_visit_pt_objs", True)
 
 class Correctness(Enum):
     INCOMPLETE = 0
