@@ -4,8 +4,9 @@ import os
 from data_processing import save_type_mappings, convert_raw_data_to_json, convert_raw_labels_to_json, gen_score_label, gen_per_q_stat_label, analyze_processed_data
 from training import (
     pretrain_and_split_data, train_predictor_and_split_data, train_ckt_encoder_and_split_data, train_ckt_predictor_and_split_data,
-    test_pretrain, test_predictor, test_ckt_encoder, test_ckt_predictor, cluster
+    test_pretrain, test_predictor, test_ckt_encoder, test_ckt_predictor
 )
+from analysis import cluster, cluster_irt, visualize_irt, block_scores
 from experiments import full_pipeline, get_ppl_performance
 from utils import initialize_seeds, device
 from constants import TrainOptions, PredictionState, Direction
@@ -69,9 +70,13 @@ if __name__ == "__main__":
     parser.add_argument("--hidden_ff_layer", type=bool_type)
     parser.add_argument("--eng_feat", type=bool_type)
     parser.add_argument("--multi_head", type=bool_type)
-    parser.add_argument("--cluster", action="store_true")
     parser.add_argument("--use_correctness", type=bool_type)
     parser.add_argument("--use_visit_pt_objs", type=bool_type)
+    parser.add_argument("--use_behavior_model", help="For IRT, use behavior-enhanced formulation", action="store_true")
+    parser.add_argument("--cluster", action="store_true")
+    parser.add_argument("--cluster_irt", action="store_true")
+    parser.add_argument("--viz_irt", action="store_true")
+    parser.add_argument("--block_scores", action="store_true")
     args = parser.parse_args()
 
     if os.path.isfile("default.json"):
@@ -127,9 +132,15 @@ if __name__ == "__main__":
         full_pipeline(args.pretrained_name, args.name, args.ckt, TrainOptions(arg_dict))
     if args.ppl:
         get_ppl_performance(args.ppl)
+    if args.irt:
+        irt(args.pretrained_name, args.name, args.data_src, args.use_behavior_model, args.ckt, TrainOptions(arg_dict))
+    if args.test_irt:
+        test_irt(args.name, args.data_src, args.use_behavior_model, args.ckt, TrainOptions(arg_dict))
     if args.cluster:
         cluster(args.name, args.data_src, TrainOptions(arg_dict))
-    if args.irt:
-        irt(args.pretrained_name, args.name, args.data_src, args.ckt, TrainOptions(arg_dict))
-    if args.test_irt:
-        test_irt(args.name, args.data_src, args.ckt, TrainOptions(arg_dict))
+    if args.cluster_irt:
+        cluster_irt(args.name, args.data_src, TrainOptions(arg_dict))
+    if args.viz_irt:
+        visualize_irt(args.name, args.data_src, args.use_behavior_model, TrainOptions(arg_dict))
+    if args.block_scores:
+        block_scores(args.data_src)

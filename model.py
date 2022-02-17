@@ -6,7 +6,6 @@ from utils import device
 
 # TODO: see if one-hot encoding improves performance
 question_embedding_size = 16
-# question_type_embedding_size = 16
 event_type_embedding_size = 16
 hidden_size = 100
 
@@ -19,18 +18,19 @@ class LSTMModel(nn.Module):
         self.mode = mode
         self.num_questions = len(type_mappings["question_ids"])
         self.available_qids = available_qids
-        # num_question_types = len(type_mappings["question_types"])
         self.num_event_types = len(type_mappings["event_types"])
         self.question_embeddings = nn.Embedding(self.num_questions, question_embedding_size)
-        # Question type gives redundant information when we have question ID
-        # self.question_type_embeddings = nn.Embedding(num_question_types, question_type_embedding_size)
         self.event_type_embeddings = nn.Embedding(self.num_event_types, event_type_embedding_size)
+
+        # self.question_one_hot = torch.eye(self.num_questions).to(device)
+        # self.event_one_hot = torch.eye(self.num_event_types).to(device)
+
         self.use_correctness = options.use_correctness
+        input_size = question_embedding_size + event_type_embedding_size + 1 # For embedding represetation
+        # input_size = self.num_questions + self.num_event_types + 1 # For one-hot representation
         if self.use_correctness:
             self.correctness_embeddings = torch.eye(num_correctness_states).to(device) # One-hot embedding for correctness states
-            input_size = question_embedding_size + event_type_embedding_size + num_correctness_states + 1
-        else:
-            input_size = question_embedding_size + event_type_embedding_size + 1
+            input_size += num_correctness_states
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -38,6 +38,7 @@ class LSTMModel(nn.Module):
             bidirectional=options.lstm_dir in (Direction.BACK, Direction.BI)
         )
         if mode == Mode.PRE_TRAIN:
+            # Linear projections to predict input
             output_size = hidden_size * (2 if options.lstm_dir == Direction.BI else 1)
             self.event_pred_layer = nn.Linear(output_size, self.num_event_types)
             self.time_pred_layer = nn.Linear(output_size, 1)
@@ -47,11 +48,12 @@ class LSTMModel(nn.Module):
             self.num_labels = num_labels
             output_size = hidden_size * (2 if options.prediction_state in (PredictionState.BOTH_CONCAT, PredictionState.ATTN, PredictionState.AVG) else 1)
             final_layer_size = output_size + (7 + len(ASSISTIVE_EVENT_IDS) if options.engineered_features else 0)
-            if options.multi_head or mode == Mode.IRT:
+
+            if options.multi_head: # Create separate output network for each data class
                 self.attention = nn.ModuleDict()
                 self.hidden_layers = nn.ModuleDict()
                 self.pred_output_layer = nn.ModuleDict()
-                all_classes = pred_clases if mode == Mode.IRT else ["10", "20", "30"]
+                all_classes = pred_clases or ["10", "20", "30"]
                 for data_class in all_classes:
                     self.attention[data_class] = nn.Linear(output_size, 1)
                     self.hidden_layers[data_class] = nn.Sequential(
@@ -68,8 +70,9 @@ class LSTMModel(nn.Module):
     def forward(self, batch):
         batch_size = batch["event_types"].shape[0]
         questions = self.question_embeddings(batch["question_ids"])
-        # question_types = self.question_type_embeddings(batch["question_types"])
         event_types = self.event_type_embeddings(batch["event_types"])
+        # questions = self.question_one_hot[batch["question_ids"]]
+        # event_types = self.event_one_hot[batch["event_types"]]
         time_deltas = batch["time_deltas"].unsqueeze(2) # Add a third dimension to be able to concat with embeddings
 
         if self.use_correctness:
@@ -98,7 +101,6 @@ class LSTMModel(nn.Module):
                 full_output = forward_output
             full_output *= batch["mask"].unsqueeze(2) # Mask to prevent info leakage at end of sequence before padding
 
-            # TODO: can mask predictions by only allowing event types that are allowed with corresponding question type
             event_predictions = self.event_pred_layer(full_output)
             # Get cross-entropy loss of predictions with labels, note that this automatically performs the softmax step
             event_loss_fn = nn.CrossEntropyLoss(reduction="none")

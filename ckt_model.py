@@ -4,8 +4,6 @@ from torch import nn
 from utils import device
 from constants import Mode
 
-# TODO: way to restructure for fine-tuning
-# single model class, where encoder/decoder params are param dicts from question id
 
 encoding_size = 50
 
@@ -23,7 +21,6 @@ class CKTEncoder(nn.Module):
         self.num_event_types = len(type_mappings["event_types"])
         self.available_event_types = available_event_types
         self.event_embeddings = torch.eye(self.num_event_types).to(device)
-        # TODO: partial score, aloc embeddings and answer state embeddings
         self.representation_size = self.num_event_types + 1
         self.encoder = nn.GRU(input_size=self.representation_size, hidden_size=self.hidden_size, batch_first=True)
         self.dropout = nn.Dropout(0.25)
@@ -37,7 +34,6 @@ class CKTEncoder(nn.Module):
         batch_size = batch["event_types"].shape[0]
         event_types = self.event_embeddings[batch["event_types"]]
         time_deltas = batch["time_deltas"].unsqueeze(2)
-        # TODO: aloc embeddings and answer state embeddings
         rnn_input = torch.cat([event_types, time_deltas], dim=2)
         packed_encoder_input = torch.nn.utils.rnn.pack_padded_sequence(
             rnn_input, lengths=batch["sequence_lengths"], batch_first=True, enforce_sorted=False)
@@ -126,17 +122,44 @@ class CKTPredictor(nn.Module):
 
 class CKTJoint(nn.Module):
     """
-    A CKT-based encoder that represents all questions
+    Contains CKT-based encoder/decoder for each question
+    Single predictor network that operates on one question at a time
     """
 
-    mlp_hidden_size = 100
-    rnn_hidden_size = 100
+    mlp_hidden_size = 50
 
-    def __init__(self, mode: Mode):
+    def __init__(self, mode: Mode, type_mappings: Dict[str, list], available_event_types: Dict[int, torch.BoolTensor] = None):
         super().__init__()
         self.mode = mode
-        # TODO: (maybe, worth it?) have single encoder/decoder model that processes all questions, can append ont-hot qid to encoded vector for reconstruction
-        # TODO: then, have map of qid to separate encoder/decoders, what we'll do is use the batch_sampler from before to send only one qid per batch
+        question_ids = sorted(type_mappings["question_ids"].values())
+
+        # Create an encoder for each question
+        self.encoder = nn.ModuleDict()
+        for qid in question_ids:
+            self.encoder[str(qid)] = CKTEncoder(type_mappings, self.mode == Mode.CKT_ENCODE, available_event_types[qid])
+
+        # Create prediction network
+        self.question_encodings = torch.eye(len(question_ids)).to(device)
+        self.predictor = nn.Sequential(
+            nn.Linear(encoding_size + len(question_ids), self.mlp_hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.25),
+            nn.Linear(self.mlp_hidden_size, 1)
+        )
 
     def forward(self, batch):
-        pass
+        batch_size = batch["event_types"].shape[0]
+        qid = batch["data_class"]
+
+        # When training encoder, just return encoder network's output
+        if self.mode == Mode.CKT_ENCODE:
+            return self.encoder[qid](batch)
+
+        # Get sequence encodings
+        encodings = self.encoder[qid](batch)
+        # Get question encoding for class and repeat for each sequence in batch, note that expand does not allocate memory
+        question_indicators = self.question_encodings[int(qid)].expand(batch_size, self.question_encodings.shape[1])
+        # Pass input through predictor network
+        pred_input = torch.cat([encodings, question_indicators], dim=1)
+        predictions = self.predictor(pred_input).view(-1)
+        return predictions

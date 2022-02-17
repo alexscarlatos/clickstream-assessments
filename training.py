@@ -1,14 +1,9 @@
-from gc import freeze
 import json
-from math import ceil
-import random
 import time
 from typing import Dict, List
-from matplotlib.colors import ListedColormap
 import torch
 import numpy as np
-from sklearn import metrics, manifold, decomposition
-import matplotlib.pyplot as plt
+from sklearn import metrics
 from data_processing import load_type_mappings, load_question_info, load_event_types_per_question, get_problem_qids
 from data_loading import Dataset, Collator, Sampler
 from ckt_data_loading import CKTEncoderDataset, CKTEncoderCollator, CKTPredictorDataset, CKTPredictorCollator
@@ -16,7 +11,7 @@ from model import LSTMModel
 from ckt_model import CKTEncoder, CKTPredictor
 from baseline import CopyBaseline
 from utils import device
-from constants import Mode, TrainOptions, Correctness
+from constants import Mode, TrainOptions
 
 BATCH_SIZE = 64
 
@@ -73,7 +68,7 @@ def get_block_a_qids(type_mappings: Dict[str, Dict[str, int]]) -> torch.BoolTens
             block_a_qids[qid] = True
     return torch.BoolTensor(block_a_qids)
 
-def get_event_types_by_qid(type_mappings: Dict[int, Dict[str, int]]) -> torch.BoolTensor:
+def get_event_types_by_qid(type_mappings: Dict[int, Dict[str, int]]) -> Dict[int, torch.BoolTensor]:
     qid_to_event_types = load_event_types_per_question()
     qid_to_event_bool_tensors = {}
     for qid, event_types in qid_to_event_types.items():
@@ -271,8 +266,8 @@ def test_pretrain(model_name: str, data_file: str, options: TrainOptions):
     loss, event_accuracy, qid_accuracy, correctness_accuracy = evaluate_model(model, test_loader, Mode.PRE_TRAIN)
     print(f"Loss: {loss:.3f}, Accuracy: Events: {event_accuracy:.3f}, QIDs: {qid_accuracy:.3f}, Correctness: {correctness_accuracy:.3f}")
 
-def create_predictor_model(pretrain_model_name: str, mode: Mode, type_mappings: dict, options: TrainOptions, num_labels: int = 1):
-    model = LSTMModel(mode, type_mappings, options, num_labels=num_labels)
+def create_predictor_model(pretrain_model_name: str, mode: Mode, type_mappings: dict, options: TrainOptions, num_labels: int = 1, pred_classes: list = None):
+    model = LSTMModel(mode, type_mappings, options, num_labels=num_labels, pred_clases=pred_classes)
 
     # Copy pretrained parameters based on settings
     states_to_copy = []
@@ -478,95 +473,3 @@ def test_ckt_predictor_with_data(encoder_model_name: str, model_name: str, test_
     loss, accuracy, auc, kappa, aggregated = evaluate_model(model, test_loader, Mode.PREDICT)
     print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
     return [loss, accuracy, auc, kappa, aggregated]
-
-# TODO: move to its own file
-
-def cluster(model_name: str, data_file: str, options: TrainOptions):
-    type_mappings = load_type_mappings()
-
-    # Load data
-    data = get_data(data_file or "data/train_data.json")
-    data = [seq for seq in data if max(seq["time_deltas"]) < 2000] # Remove time outliers
-    data_loader = torch.utils.data.DataLoader(
-        Dataset(data, type_mappings, labels=get_labels(options.task, True)),
-        collate_fn=Collator(),
-        batch_size=len(data)
-    )
-
-    # Load model
-    model = LSTMModel(Mode.CLUSTER, load_type_mappings(), options).to(device)
-    model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
-    model.eval()
-
-    # Extract latent state for each sequence in the dataset
-    print("Extracting latent states")
-    with torch.no_grad():
-        for batch in data_loader:
-            latent_states, predictions = model(batch)
-            latent_states = latent_states.detach().cpu().numpy()
-            predictions = predictions.detach().cpu().numpy()
-            predictions[predictions > 0] = 1
-            predictions[predictions < 0] = 0
-            labels = batch["labels"].detach().cpu().numpy()
-
-    # Represent latent states in 2D space
-    print("Performing Dimension Reduction")
-    algo = "tsne"
-    if algo == "pca":
-        transformer = decomposition.PCA(2)
-    elif algo == "mds":
-        transformer = manifold.MDS(2)
-    elif algo == "tsne":
-        transformer = manifold.TSNE(2, perplexity=15, learning_rate="auto", n_iter=1000, init="pca", random_state=221)
-    reduced_states = transformer.fit_transform(latent_states)
-
-    # Randomly downsample rendered points to reduce clutter
-    print("Downsampling")
-    sample_rate = 1
-    sample_idxs = random.sample(range(len(reduced_states)), int(sample_rate * len(reduced_states)))
-    data = np.array(data)[sample_idxs]
-    reduced_states = reduced_states[sample_idxs]
-    labels = labels[sample_idxs]
-    predictions = predictions[sample_idxs]
-
-    # Define the plots to be shown
-    bin_cmap = ListedColormap(["red", "blue"])
-    num_visited_questions = [len([qs for qs in seq["q_stats"].values() if qs["visits"]]) for seq in data]
-    plots = [
-        ("Label", bin_cmap, labels), # Good
-        # ("Prediction", bin_cmap, predictions), # Good
-        ("Block A Score", "viridis", [seq["block_a_score"] for seq in data]), # Good
-        ("Num Events", "viridis", [len(seq["event_types"]) for seq in data]), # Good
-        ("Questions Attempted", "viridis", [sum(qs["correct"] != Correctness.INCOMPLETE.value for qs in seq["q_stats"].values()) for seq in data]), # Good
-        # ("Questions Visited", "viridis", num_visited_questions), # Very similar to questions attempted
-        ("Total Time", "viridis", [min(max(seq["time_deltas"]), 1800) for seq in data]), # Good
-        # ("Avg. Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) / len([qs for qs in seq["q_stats"].values() if qs["visits"]]) for seq in data]), # Not Great
-        # ("Num Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) for seq in data]), # Not Great
-        # ("Avg. Time Spent", "viridis", [
-        #     min(
-        #         sum(qs["time"] for qs in seq["q_stats"].values()) / num_visited_questions[seq_idx],
-        #         1800 / num_visited_questions[seq_idx] # Min since some sequences have messed up timestamps and we don't want outliers
-        #     )
-        #     for seq_idx, seq in enumerate(data)
-        # ]), # Not Great
-        # ("Std. Time Spent", "viridis", [np.array([qs["time"] for qs in seq["q_stats"].values()]).std() for seq in data]), # Not Great
-    ]
-
-    # Register the plots based on their definitions
-    num_cols = 2
-    num_rows = ceil(len(plots) / num_cols)
-    fig, axes = plt.subplots(num_rows, num_cols)
-    fig.suptitle("Dimension-Reduced Latent State Vectors")
-    for plot_idx, (title, cmap, c_vec) in enumerate(plots):
-        ax = axes[plot_idx] if num_rows == 1 else axes[plot_idx // num_cols, plot_idx % num_cols]
-        scatter = ax.scatter(reduced_states[:,0], reduced_states[:,1], c=c_vec, cmap=cmap, picker=True, pickradius=5)
-        ax.legend(*scatter.legend_elements(), loc='center left', bbox_to_anchor=(1, 0.5), title=title)
-
-    # Define click handler - print information associated with clicked point
-    def onpick(event):
-        ind = event.ind
-        print(data[ind])
-    fig.canvas.mpl_connect('pick_event', onpick)
-
-    # Render the plots
-    plt.show()

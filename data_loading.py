@@ -84,17 +84,20 @@ def get_sub_sequences(sequence, question_ids: set = None, concat_visits = True, 
                 "student_id": sequence["student_id"],
                 "data_class": sequence["data_class"],
                 "question_id": qid,
+                "question_type": sequence["question_types"][start_idx],
                 "event_types": sequence["event_types"][start_idx : last_idx + 1],
+                "time_deltas": sequence["time_deltas"][start_idx : last_idx + 1],
+                "num_visits": 1,
+                "max_gap": 0,
                 "complete": sequence["correctness"][last_idx] != Correctness.INCOMPLETE.value,
                 "correct": sequence["correctness"][last_idx] == Correctness.CORRECT.value
             }
-            if qid_seq:
-                sub_seq["question_ids"] = sequence["question_ids"][start_idx : last_idx + 1]
+            sub_seq["total_time"] = sub_seq["time_deltas"][-1] - sub_seq["time_deltas"][0]
             if log_time:
                 # Convert to log2 as per CKT paper, add 1 to avoid log(0)
-                sub_seq["time_deltas"] = np.log2(sequence["time_deltas"][start_idx : last_idx + 1]) + 1
-            else:
-                sub_seq["time_deltas"] = sequence["time_deltas"][start_idx : last_idx + 1]
+                sub_seq["time_deltas"] = np.log2(sub_seq["time_deltas"]) + 1
+            if qid_seq:
+                sub_seq["question_ids"] = sequence["question_ids"][start_idx : last_idx + 1]
             sub_sequences.append(sub_seq)
         start_idx = last_idx + 1
 
@@ -106,13 +109,17 @@ def get_sub_sequences(sequence, question_ids: set = None, concat_visits = True, 
                 qid_to_sub_sequences[sub_seq["question_id"]] = sub_seq
             else:
                 qid_sub_seqs = qid_to_sub_sequences[sub_seq["question_id"]]
-                qid_sub_seqs["question_ids"] += sub_seq["question_ids"]
                 qid_sub_seqs["event_types"] += sub_seq["event_types"]
+                qid_sub_seqs["max_gap"] = max(qid_sub_seqs["max_gap"], sub_seq["time_deltas"][0] - qid_sub_seqs["time_deltas"][-1])
                 # TODO: concat is really slow
                 qid_sub_seqs["time_deltas"] = np.concatenate([qid_sub_seqs["time_deltas"], sub_seq["time_deltas"]])
+                qid_sub_seqs["num_visits"] += 1
+                qid_sub_seqs["total_time"] += sub_seq["total_time"]
                 # Take correctness of most recent visit
                 qid_sub_seqs["complete"] = sub_seq["complete"]
                 qid_sub_seqs["correct"] = sub_seq["correct"]
+                if qid_seq:
+                    qid_sub_seqs["question_ids"] += sub_seq["question_ids"]
         sub_sequences = list(qid_to_sub_sequences.values())
 
     return sub_sequences
@@ -168,6 +175,23 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         return self.data[index]
 
+    def shuffle(self, seed: int):
+        random.Random(seed).shuffle(self.data)
+
+    def set_data_class(self, data_class_field: str):
+        """
+        Set data_class of each sequence to its value in data_class_field
+        """
+        for seq in self.data:
+            seq["data_class"] = str(seq[data_class_field])
+
+    def sort_by_data_class(self):
+        """
+        Sort self.data by data_class
+        Returns the sizes of each class, to be used by Sampler
+        """
+        self.data.sort(key=lambda seq: seq["data_class"])
+
 class Sampler(torch.utils.data.Sampler):
     def __init__(self, chunk_sizes: List[int], batch_size: Optional[int] = None):
         self.chunk_sizes = chunk_sizes
@@ -181,7 +205,7 @@ class Sampler(torch.utils.data.Sampler):
         Assumption: initial data ordering will be contiguous chunks
         """
         # Shuffle sample indices within each chunk
-        chunk_idx_shuffles = [np.array(random.sample(list(range(chunk_size)), chunk_size)) for chunk_size in self.chunk_sizes]
+        chunk_idx_shuffles = [np.array(random.sample(range(chunk_size), chunk_size)) for chunk_size in self.chunk_sizes]
         # Shuffle order from which chunks are drawn, resulting in array with size of total number of batches
         batches_per_chunk = [int(chunk_size / self.batch_size) if self.batch_size else 1 for chunk_size in self.chunk_sizes]
         chunk_draws = [chunk_num for chunk_num, batches_in_chunk in enumerate(batches_per_chunk) for _ in range(batches_in_chunk)]
@@ -195,7 +219,7 @@ class Sampler(torch.utils.data.Sampler):
             batch_start_idx = chunk_batch_idx[chunk_num] * batch_size
             chunk_batch_idx[chunk_num] += 1
             # Get corresponding shuffled data indices for batch
-            # idxs_in_chunk = chunk_idx_shuffles[chunk_num][np.arange(batch_start_idx, batch_start_idx + batch_size)]
+            # idxs_in_chunk = chunk_idx_shuffles[chunk_num][np.arange(batch_start_idx, batch_start_idx + batch_size)] # TODO: delete
             idxs_in_chunk = chunk_idx_shuffles[chunk_num][batch_start_idx : batch_start_idx + batch_size]
             idxs = idxs_in_chunk + sum(self.chunk_sizes[:chunk_num])
             yield idxs
@@ -210,7 +234,6 @@ class Collator:
 
     def __call__(self, batch: List[Dict]):
         question_id_batches = []
-        # question_type_batches = []
         event_type_batches = []
         time_delta_batches = []
         time_ratio_batches = []
@@ -229,6 +252,8 @@ class Collator:
             trim_length = 5 * 60
             trim_max = 30 * 60
             trim_at = random.randint(1, trim_max / trim_length) * trim_length
+
+        assert all(seq["data_class"] == batch[0]["data_class"] for seq in batch) # TODO: remove after verifying
 
         for sequence in batch:
             # Convert data structures to torch tensors
@@ -295,7 +320,6 @@ class Collator:
 
         return {
             "question_ids": torch.nn.utils.rnn.pad_sequence(question_id_batches, batch_first=True).to(device) if question_id_batches else None,
-            # "question_types": torch.nn.utils.rnn.pad_sequence(question_type_batches, batch_first=True).to(device),
             "event_types": torch.nn.utils.rnn.pad_sequence(event_type_batches, batch_first=True).to(device),
             "time_deltas": torch.nn.utils.rnn.pad_sequence(time_delta_batches, batch_first=True).to(device),
             "correctness": torch.nn.utils.rnn.pad_sequence(correctness_batches, batch_first=True).to(device) if correctness_batches else None,
