@@ -1,3 +1,4 @@
+from typing import List
 import json
 import numpy as np
 import pandas
@@ -8,7 +9,7 @@ from training import pretrain, train_predictor, test_predictor_with_data, get_da
 from utils import initialize_seeds
 from constants import TrainOptions
 
-def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, options: TrainOptions):
+def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, data_classes: List[str], options: TrainOptions):
     test_data_from_train_data = False
 
     # Get train and test data
@@ -19,9 +20,12 @@ def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, options: Tra
         train_data_for_split = train_data_full[:len(train_data_full) // 3]
         test_data_file = "data/test_data_full.json"
     else:
-        train_data_full = np.array(get_data("data/train_data_full.json"))
+        data_class = data_classes[0] if data_classes else "30"
+        dc_to_train_file = {"30": "data/train_data_30.json", "20": "data/train_data_20.json", "10": "data/train_data_10.json"}
+        dc_to_test_file = {"30": "data/test_data_30.json", "20": "data/test_data_20.json", "10": "data/test_data_10.json"}
+        train_data_full = np.array(get_data(dc_to_train_file[data_class]))
         train_data_for_split = train_data_full
-        test_data_file = "data/test_data_30.json"
+        test_data_file = dc_to_test_file[data_class]
     if not test_data_from_train_data:
         test_data = get_data(test_data_file)
 
@@ -69,18 +73,23 @@ def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, options: Tra
         print("\nPretraining Phase")
         options.lr = 1e-3
         options.epochs = 150 if ckt else 100
+        options.weight_decay = 1e-6
         # Just pretrain on 30-minute data if using mixed training data
         train_data_for_pt = train_data[len(train_data_idx) * 2:] if options.mixed_time else train_data
         val_data_for_pt = val_data[len(val_data_idx) * 2:] if options.mixed_time else val_data
-        if False:
+        do_pretrain = True
+        if do_pretrain:
             if ckt:
                 train_ckt_encoder(cur_pretrained_name, train_data_for_pt, val_data_for_pt, options)
             else:
                 pretrain(cur_pretrained_name, train_data_for_pt, val_data_for_pt, options)
 
+        initialize_seeds(221) # Re-initialize seeds so that the following will be exactly the same whether or not we skip pretraing
+
         print("\nTrain classifier on frozen LSTM")
         options.lr = 5e-4 if ckt else 5e-3
-        options.epochs = 100
+        options.epochs = 50 if ckt else 100
+        options.weight_decay = 1e-2
         options.use_pretrained_embeddings = True
         options.use_pretrained_weights = True
         options.use_pretrained_head = False
@@ -88,25 +97,32 @@ def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, options: Tra
         options.freeze_model = True
         if ckt:
             val_stats = train_ckt_predictor(cur_pretrained_name, cur_model_name, train_data, val_data, train_label_dict, options)
-            test_stats = test_ckt_predictor_with_data(cur_pretrained_name, cur_model_name, test_data, options)
+            test_stats = test_ckt_predictor_with_data(cur_model_name, test_data, options)
         else:
             val_stats = train_predictor(cur_pretrained_name, cur_model_name, train_data, val_data, train_label_dict, options)
             test_stats = test_predictor_with_data(cur_model_name, test_data, options)
+            # val_stats = [0] * (len(test_stats) + 1)
         all_frozen_stats.append(val_stats + test_stats)
 
-        # Not fine-tuning CKT models for now
-        if True:
+        fine_tune = True
+        if not fine_tune:
             all_ft_stats.append([0] * (len(val_stats) * 2))
             continue
 
         print("\nFine-tune LSTM for classifier")
-        options.lr = 5e-5
+        options.lr = 5e-5 if ckt else 5e-5
         options.epochs = 50
+        options.weight_decay = 10
         options.use_pretrained_head = True
         options.freeze_embeddings = False
         options.freeze_model = False
-        val_stats = train_predictor(cur_model_name, cur_model_ft_name, train_data, val_data, train_label_dict, options)
-        test_stats = test_predictor(cur_model_ft_name, test_data, options)
+        if ckt:
+            val_stats = train_ckt_predictor(cur_model_name, cur_model_ft_name, train_data, val_data, train_label_dict, options)
+            test_stats = test_ckt_predictor_with_data(cur_model_ft_name, test_data, options)
+        else:
+            val_stats = train_predictor(cur_model_name, cur_model_ft_name, train_data, val_data, train_label_dict, options)
+            test_stats = test_predictor_with_data(cur_model_ft_name, test_data, options)
+            # val_stats = [0] * (len(test_stats) + 1)
         all_ft_stats.append(val_stats + test_stats)
 
     stat_template = "Epoch: {:.3f}, Val Loss: {:.3f}, Acc: {:.3f}, AUC: {:.3f}, Kap: {:.3f}, Agg: {:.3f}, Test Loss: {:.3f}, Acc: {:.3f}, AUC: {:.3f}, Kap: {:.3f}, Agg: {:.3f}"
@@ -149,4 +165,4 @@ def get_ppl_performance(output_filename: str):
         accuracy = accuracy_score(labels, preds)
         kappa = cohen_kappa_score(labels, preds)
         agg = adj_auc + kappa
-        print(f"Accuracy: {accuracy:.3f}, Adj. AUC: {adj_auc:.3f}, Kappa: {kappa:.3f}, Agg: {agg:.3f}")
+        print(f"Accuracy: {accuracy:.3f}, AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {agg:.3f}")

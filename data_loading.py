@@ -5,7 +5,7 @@ import numpy as np
 from constants import Correctness
 from utils import device
 
-def add_engineered_features(sequence):
+def add_engineered_features(sequence: dict):
     time_taken = np.array([question["time"] for question in sequence["q_stats"].values()])
     visits = np.array([question["visits"] for question in sequence["q_stats"].values()])
     correctness = np.array([question["correct"] == Correctness.CORRECT.value for question in sequence["q_stats"].values()])
@@ -22,10 +22,10 @@ def add_engineered_features(sequence):
         *sequence["assistive_uses"].values()
     ]
 
-def add_visit_level_features_and_correctness(sequence):
+def add_visit_level_features_and_correctness(sequence: dict):
     """
     Calculate visits - for the last event of each visit to a question - the index, question id, correctness, and timestamp
-    Additionally, apply WORKING correctness state to all events that are not the last in a visit
+    Additionally, apply visit's final correctness state to all events that are not the last in a visit
     """
 
     seq_len = len(sequence["question_ids"])
@@ -45,9 +45,6 @@ def add_visit_level_features_and_correctness(sequence):
             visits["correctness"].append(sequence["correctness"][idx - 1])
             visits["time_deltas"].append(sequence["time_deltas"][idx - 1])
             cur_qid = qid
-        # Correctness should always be "working" except at last timestep of each visit
-        elif idx > 0:
-            sequence["correctness"][idx - 1] = Correctness.WORKING.value
     # Create final visit
     visits["idxs"].append(seq_len - 1)
     visits["qids"].append(cur_qid)
@@ -56,7 +53,14 @@ def add_visit_level_features_and_correctness(sequence):
     # Add mask for collator and model
     visits["mask"] = torch.ones(len(visits["time_deltas"]), dtype=torch.bool)
 
-def add_time_ratios(sequence):
+    # Assign final correctness state of visit to each event in the sequence
+    start_event_idx = 0
+    for visit_idx, end_event_idx in enumerate(visits["idxs"]):
+        for event_idx in range(start_event_idx, end_event_idx):
+            sequence["correctness"][event_idx] = visits["correctness"][visit_idx]
+        start_event_idx = end_event_idx + 1
+
+def add_time_ratios(sequence: dict):
     """
     For each event, calculate the ratio between the previous and following timesteps
     For timestep t, previous timestep t1 and following timestep t2, ratio = (t - t1)/(t2 - t1)
@@ -73,7 +77,7 @@ def add_time_ratios(sequence):
         ratio = time_steps[:-1] / time_spans
         sequence["time_ratios"] = np.concatenate([[0], ratio, [1]])
 
-def get_sub_sequences(sequence, question_ids: set = None, concat_visits = True, log_time: bool = False, qid_seq: bool = False):
+def get_sub_sequences(sequence: dict, question_ids: set, concat_visits, log_time: bool, qid_seq: bool, correctness_seq: bool):
     # Split a sequence into a list of subsequences by visit
     start_idx = 0
     sub_sequences = []
@@ -98,6 +102,8 @@ def get_sub_sequences(sequence, question_ids: set = None, concat_visits = True, 
                 sub_seq["time_deltas"] = np.log2(sub_seq["time_deltas"]) + 1
             if qid_seq:
                 sub_seq["question_ids"] = sequence["question_ids"][start_idx : last_idx + 1]
+            if correctness_seq:
+                sub_seq["correctness"] = sequence["correctness"][start_idx : last_idx + 1]
             sub_sequences.append(sub_seq)
         start_idx = last_idx + 1
 
@@ -120,6 +126,8 @@ def get_sub_sequences(sequence, question_ids: set = None, concat_visits = True, 
                 qid_sub_seqs["correct"] = sub_seq["correct"]
                 if qid_seq:
                     qid_sub_seqs["question_ids"] += sub_seq["question_ids"]
+                if correctness_seq:
+                    qid_sub_seqs["correctness"] += sub_seq["correctness"]
         sub_sequences = list(qid_to_sub_sequences.values())
 
     return sub_sequences
@@ -127,7 +135,7 @@ def get_sub_sequences(sequence, question_ids: set = None, concat_visits = True, 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data: List[Dict[str, list]], type_mappings: dict, labels: Dict[str, bool] = None, correct_as_label: bool = False,
                  engineered_features: bool = False, qids_for_subseq_split: set = None, concat_visits: bool = True, time_ratios: bool = False,
-                 log_time: bool = False, qid_seq: bool = True):
+                 pretrain_mask_ratio: float = None, log_time: bool = False, qid_seq: bool = True, correctness_seq: bool = False):
 
         self.data = []
         total_positive = 0
@@ -137,9 +145,10 @@ class Dataset(torch.utils.data.Dataset):
         def add_sequence(sequence):
             nonlocal total_positive
 
+            sequence_len = len(sequence["time_deltas"])
             sequence["sid"] = type_mappings["student_ids"][str(sequence["student_id"])]
             sequence["time_deltas"] = np.array(sequence["time_deltas"], dtype=np.float32)
-            sequence["mask"] = torch.ones(len(sequence["time_deltas"]), dtype=torch.bool)
+            sequence["mask"] = torch.ones(sequence_len, dtype=torch.bool)
 
             if correct_as_label:
                 sequence["label"] = sequence["correct"]
@@ -154,6 +163,11 @@ class Dataset(torch.utils.data.Dataset):
             if engineered_features:
                 add_engineered_features(sequence)
 
+            if pretrain_mask_ratio:
+                ptm_idxs = random.sample(range(sequence_len), int(sequence_len * pretrain_mask_ratio))
+                sequence["pretrain_mask"] = torch.zeros(sequence_len, dtype=torch.bool)
+                sequence["pretrain_mask"][ptm_idxs] = True
+
             self.data.append(sequence)
 
         # Iterate over given data list and process each sequence
@@ -161,11 +175,12 @@ class Dataset(torch.utils.data.Dataset):
             add_visit_level_features_and_correctness(sequence)
 
             if qids_for_subseq_split:
-                for sub_seq in get_sub_sequences(sequence, qids_for_subseq_split, concat_visits, log_time, qid_seq):
+                for sub_seq in get_sub_sequences(sequence, qids_for_subseq_split, concat_visits, log_time, qid_seq, correctness_seq):
                     add_sequence(sub_seq)
             else:
                 add_sequence(sequence)
 
+        print("Data size:", len(self.data))
         if bin_labels:
             print(f"Positive rate: {total_positive / len(self.data):.3f}")
 
@@ -219,7 +234,6 @@ class Sampler(torch.utils.data.Sampler):
             batch_start_idx = chunk_batch_idx[chunk_num] * batch_size
             chunk_batch_idx[chunk_num] += 1
             # Get corresponding shuffled data indices for batch
-            # idxs_in_chunk = chunk_idx_shuffles[chunk_num][np.arange(batch_start_idx, batch_start_idx + batch_size)] # TODO: delete
             idxs_in_chunk = chunk_idx_shuffles[chunk_num][batch_start_idx : batch_start_idx + batch_size]
             idxs = idxs_in_chunk + sum(self.chunk_sizes[:chunk_num])
             yield idxs
@@ -243,6 +257,7 @@ class Collator:
         visit_correctness_batches = []
         mask_batches = []
         visit_mask_batches = []
+        pretrain_mask_batches = []
         student_ids = []
         question_ids_collapsed = []
         engineered_features = []
@@ -259,12 +274,14 @@ class Collator:
             # Convert data structures to torch tensors
             time_deltas = torch.from_numpy(sequence["time_deltas"])
             if len(time_deltas) < 2: # A single-event sequence messes with time_ratios calculations, so is unusable
-                print(f"Skipping student {sequence['student_id']}, sequence has length {len(time_deltas)}")
+                # print(f"Skipping student {sequence['student_id']}, sequence has length {len(time_deltas)}")
                 continue
             if "question_ids" in sequence:
                 qids = torch.LongTensor(sequence["question_ids"])
             eids = torch.LongTensor(sequence["event_types"])
             mask = sequence["mask"]
+            if "pretrain_mask" in sequence:
+                pretrain_mask = sequence["pretrain_mask"]
             if "correctness" in sequence:
                 correctness = torch.LongTensor(sequence["correctness"])
             if "time_ratios" in sequence:
@@ -284,6 +301,8 @@ class Collator:
                     qids = qids[time_mask]
                 eids = eids[time_mask]
                 mask = mask[time_mask]
+                if "pretrain_mask" in sequence:
+                    pretrain_mask = pretrain_mask[time_mask]
                 if "correctness" in sequence:
                     correctness = correctness[time_mask]
                 if "time_ratios" in sequence:
@@ -301,6 +320,8 @@ class Collator:
                 question_id_batches.append(qids)
             event_type_batches.append(eids)
             mask_batches.append(mask)
+            if "pretrain_mask" in sequence:
+                pretrain_mask_batches.append(pretrain_mask)
             if "correctness" in sequence:
                 correctness_batches.append(correctness)
             if "time_ratios" in sequence:
@@ -324,6 +345,7 @@ class Collator:
             "time_deltas": torch.nn.utils.rnn.pad_sequence(time_delta_batches, batch_first=True).to(device),
             "correctness": torch.nn.utils.rnn.pad_sequence(correctness_batches, batch_first=True).to(device) if correctness_batches else None,
             "mask": torch.nn.utils.rnn.pad_sequence(mask_batches, batch_first=True).to(device),
+            # "pretrain_mask": torch.nn.utils.rnn.pad_sequence(pretrain_mask_batches, batch_first=True).to(device) if pretrain_mask_batches else None,
             "time_ratios": torch.nn.utils.rnn.pad_sequence(time_ratio_batches, batch_first=True).to(device) if time_ratio_batches else None,
             "visits": {
                 "idxs": torch.nn.utils.rnn.pad_sequence(visit_idx_batches, batch_first=True).to(device),

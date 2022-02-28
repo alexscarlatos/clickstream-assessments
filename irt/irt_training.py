@@ -27,7 +27,7 @@ from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 from data_processing import load_type_mappings, get_problem_qids
 from data_loading import Dataset, Collator, Sampler
-from training import get_data, train, evaluate_model, create_predictor_model, get_event_types_by_qid, BATCH_SIZE
+from training import get_data, train, evaluate_model, create_predictor_model, get_event_types_by_qid, get_chunk_sizes, BATCH_SIZE
 from model import LSTMModel
 from ckt_model import CKTJoint
 from irt.irt_model import IRT
@@ -40,31 +40,9 @@ def get_all_problem_qids(type_mappings: dict):
 
 def get_processed_dataset(src_data: list, type_mappings: dict, ckt: bool, problem_qids: set, options: TrainOptions):
     full_dataset = Dataset(src_data, type_mappings, correct_as_label=True, qids_for_subseq_split=problem_qids,
-                           concat_visits=options.concat_visits, time_ratios=not ckt, log_time=ckt, qid_seq=not ckt)
+                           concat_visits=options.concat_visits, time_ratios=not ckt, log_time=ckt, qid_seq=not ckt, correctness_seq=False)
     full_dataset.shuffle(221) # Randomly arrange the data
     return full_dataset
-
-def get_chunk_sizes(dataset):
-    """
-    Given a dataset sorted by data_class
-    Return the number of elements of each class, in sorted order
-    """
-    chunk_sizes = []
-    cur_chunk_size = 0
-    cur_class = dataset[0]["data_class"]
-    allocated_classes = set()
-    for seq in dataset:
-        assert seq["data_class"] not in allocated_classes, "Data not sorted by class"
-        if seq["data_class"] != cur_class:
-            allocated_classes.add(cur_class)
-            cur_class = seq["data_class"]
-            chunk_sizes.append(cur_chunk_size)
-            cur_chunk_size = 1
-        else:
-            cur_chunk_size += 1
-    chunk_sizes.append(cur_chunk_size) # Add last chunk since no class change will occur at end
-    assert sum(chunk_sizes) == len(dataset)
-    return chunk_sizes
 
 def irt(pretrained_name: str, model_name: str, data_file: str, use_behavior_model: bool, ckt: bool, options: TrainOptions):
     # Not using correctness info to verify that additional performance come strictly from behavioral data
@@ -159,22 +137,25 @@ def irt(pretrained_name: str, model_name: str, data_file: str, use_behavior_mode
         data_stats("Train:", train_data)
         data_stats("Val:", val_data)
 
+        do_pretrain = True
         if use_behavior_model:
             # Train behavior model on train data split
             print("\nPretraining Behavior Model")
             pretrained_behavior_model_name = f"{pretrained_name}_{k + 1}"
             if ckt:
-                behavior_model_pt = CKTJoint(Mode.CKT_ENCODE, type_mappings, event_types_by_qid).to(device)
-                # train(behavior_model_pt, Mode.CKT_ENCODE, pretrained_behavior_model_name, train_loader, val_loader,
-                #       lr=1e-3, weight_decay=1e-6, epochs=20)
-                behavior_model = CKTJoint(Mode.IRT, type_mappings, event_types_by_qid).to(device)
-                behavior_model.load_state_dict(torch.load(f"{pretrained_behavior_model_name}.pt", map_location=device))
+                if do_pretrain:
+                    behavior_model_pt = CKTJoint(Mode.CKT_ENCODE, type_mappings, False, event_types_by_qid).to(device)
+                    train(behavior_model_pt, Mode.CKT_ENCODE, pretrained_behavior_model_name, train_loader, val_loader,
+                        lr=1e-3, weight_decay=1e-6, epochs=20)
+                behavior_model = CKTJoint(Mode.IRT, type_mappings, False, event_types_by_qid).to(device)
+                behavior_model.load_params(torch.load(f"{pretrained_behavior_model_name}.pt", map_location=device))
                 for param in behavior_model.encoder.parameters():
                     param.requires_grad = False
             else:
-                behavior_model_pt = LSTMModel(Mode.PRE_TRAIN, type_mappings, options, available_qids=problem_qids).to(device)
-                train(behavior_model_pt, Mode.PRE_TRAIN, pretrained_behavior_model_name, train_loader, val_loader,
-                      lr=1e-3, weight_decay=1e-6, epochs=20)
+                if do_pretrain:
+                    behavior_model_pt = LSTMModel(Mode.PRE_TRAIN, type_mappings, options, available_qids=problem_qids).to(device)
+                    train(behavior_model_pt, Mode.PRE_TRAIN, pretrained_behavior_model_name, train_loader, val_loader,
+                        lr=1e-3, weight_decay=1e-6, epochs=20)
                 options.freeze_model = True
                 options.freeze_embeddings = True
                 options.use_pretrained_weights = True
@@ -182,6 +163,8 @@ def irt(pretrained_name: str, model_name: str, data_file: str, use_behavior_mode
                 behavior_model = create_predictor_model(pretrained_behavior_model_name, Mode.IRT, type_mappings, options, pred_classes=pred_classes)
         else:
             behavior_model = None
+
+        initialize_seeds(221) # Re-initialize seeds so that the following will be exactly the same whether or not we skip pretraing
 
         # Train model
         print("\nTraining IRT Model")
@@ -193,7 +176,7 @@ def irt(pretrained_name: str, model_name: str, data_file: str, use_behavior_mode
 
         # Test model
         loss, accuracy, auc, kappa, aggregated = evaluate_model(model, test_loader, Mode.PREDICT)
-        print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
+        print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
 
         # Fine-tune model
         if use_behavior_model:
@@ -210,7 +193,7 @@ def irt(pretrained_name: str, model_name: str, data_file: str, use_behavior_mode
 
             # Test model
             loss, accuracy, auc, kappa, aggregated = evaluate_model(model, test_loader, Mode.PREDICT)
-            print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
+            print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
 
         break # TODO: just one fold for now
 
@@ -219,7 +202,7 @@ def get_model_for_testing(mode: Mode, model_name: str, type_mappings: dict, use_
     options.use_correctness = False
     if use_behavior_model:
         if ckt:
-            behavior_model = CKTJoint(mode, type_mappings, event_types_by_qid).to(device)
+            behavior_model = CKTJoint(mode, type_mappings, False, event_types_by_qid).to(device)
         else:
             behavior_model = LSTMModel(mode, type_mappings, options, pred_clases=pred_classes).to(device)
     else:
@@ -263,7 +246,7 @@ def test_irt(model_name: str, data_file: str, use_behavior_model: bool, ckt: boo
         **({"batch_sampler": Sampler(test_chunk_sizes)} if batch_by_class else {"batch_size": BATCH_SIZE})
     )
     loss, accuracy, auc, kappa, aggregated = evaluate_model(model, full_test_loader, Mode.PREDICT)
-    print(f"All: Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
+    print(f"All: Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
     complete_idxs = [idx for idx, entry in enumerate(test_data) if entry["complete"]]
     complete_test_data = torch.utils.data.Subset(test_data, complete_idxs)
     complete_test_chunk_sizes = get_chunk_sizes(complete_test_data)
@@ -273,4 +256,4 @@ def test_irt(model_name: str, data_file: str, use_behavior_model: bool, ckt: boo
         **({"batch_sampler": Sampler(complete_test_chunk_sizes)} if batch_by_class else {"batch_size": BATCH_SIZE})
     )
     loss, accuracy, auc, kappa, aggregated = evaluate_model(model, complete_test_loader, Mode.PREDICT)
-    print(f"Only Complete: Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
+    print(f"Only Complete: Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")

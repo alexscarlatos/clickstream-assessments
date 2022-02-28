@@ -6,14 +6,15 @@ import numpy as np
 from sklearn import metrics
 from data_processing import load_type_mappings, load_question_info, load_event_types_per_question, get_problem_qids
 from data_loading import Dataset, Collator, Sampler
-from ckt_data_loading import CKTEncoderDataset, CKTEncoderCollator, CKTPredictorDataset, CKTPredictorCollator
+from ckt_data_loading import CKTPredictorDataset, CKTPredictorCollator
 from model import LSTMModel
-from ckt_model import CKTEncoder, CKTPredictor
+from ckt_model import CKTJoint
+from bert_model import ClickBERT
 from baseline import CopyBaseline
 from utils import device
 from constants import Mode, TrainOptions
 
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 
 def get_data(data_filename: str, partition: float = None, three_way_split: bool = False) -> List[dict]:
     print("Loading data")
@@ -28,7 +29,6 @@ def get_data(data_filename: str, partition: float = None, three_way_split: bool 
             chunk_size = int(data_len / 3)
             for i in range(0, data_len, chunk_size):
                 chunk = data[i:i + chunk_size]
-                # TODO: shuffle chunks without breaking it
                 res[0] += chunk[:int(partition * chunk_size)]
                 res[1] += chunk[int(partition * chunk_size):]
         else:
@@ -84,7 +84,29 @@ def get_block_a_problem_qids(type_mappings):
             continue
         yield type_mappings["question_ids"][qid_str], qid_str
 
-def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: Mode, print_examples: bool = False):
+def get_chunk_sizes(dataset):
+    """
+    Given a dataset sorted by data_class
+    Return the number of elements of each class, in sorted order
+    """
+    chunk_sizes = []
+    cur_chunk_size = 0
+    cur_class = dataset[0]["data_class"]
+    allocated_classes = set()
+    for seq in dataset:
+        assert seq["data_class"] not in allocated_classes, "Data not sorted by class"
+        if seq["data_class"] != cur_class:
+            allocated_classes.add(cur_class)
+            cur_class = seq["data_class"]
+            chunk_sizes.append(cur_chunk_size)
+            cur_chunk_size = 1
+        else:
+            cur_chunk_size += 1
+    chunk_sizes.append(cur_chunk_size) # Add last chunk since no class change will occur at end
+    assert sum(chunk_sizes) == len(dataset)
+    return chunk_sizes
+
+def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: Mode):
     total_loss = 0
     num_batches = 0
     all_predictions = []
@@ -92,37 +114,40 @@ def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: 
     with torch.no_grad():
         for batch in validation_loader:
             loss, predictions = model(batch)
-            if mode == Mode.PRE_TRAIN:
+            if mode == Mode.PRE_TRAIN or mode == Mode.CKT_ENCODE:
                 has_qids = predictions[1] is not None
                 has_correctness = predictions[2] is not None
                 event_types = batch["event_types"].view(-1).detach().cpu().numpy()
                 qids = batch["visits"]["qids"].view(-1).detach().cpu().numpy() if has_qids else None
-                correctness = batch["visits"]["correctness"].view(-1).detach().cpu().numpy() if has_correctness else None
-                mask = batch["mask"].view(-1).detach().cpu().numpy()
-                visit_mask = batch["visits"]["mask"].view(-1).detach().cpu().numpy() if has_qids or has_correctness else None
+                # Our model predicts correctness on the visit level but CKT does on the event level
+                if mode == Mode.PRE_TRAIN:
+                    correctness = batch["visits"]["correctness"].view(-1).detach().cpu().numpy() if has_correctness else None
+                elif mode == Mode.CKT_ENCODE:
+                    correctness = batch["correctness"].view(-1).detach().cpu().numpy() if has_correctness else None
+                if "pretrain_mask" in batch:
+                    mask = batch["pretrain_mask"].view(-1).detach().cpu().numpy()
+                else:
+                    mask = batch["mask"].view(-1).detach().cpu().numpy()
+                if mode == Mode.PRE_TRAIN:
+                    visit_mask = batch["visits"]["mask"].view(-1).detach().cpu().numpy() if has_qids or has_correctness else None
 
                 all_predictions.append([
-                    predictions[0][mask == 1], # events
-                    predictions[1][visit_mask == 1] if has_qids else [], # qids
-                    predictions[2][visit_mask == 1] if has_correctness else [], # correctness
+                    predictions[0][mask], # events
+                    predictions[1][visit_mask] if has_qids else [],
+                    predictions[2][visit_mask if mode == Mode.PRE_TRAIN else mask] if has_correctness else [],
                 ])
                 all_labels.append([
-                    event_types[mask == 1],
-                    qids[visit_mask == 1] if has_qids else [],
-                    correctness[visit_mask == 1] if has_correctness else [],
+                    event_types[mask],
+                    qids[visit_mask] if has_qids else [],
+                    correctness[visit_mask if mode == Mode.PRE_TRAIN else mask] if has_correctness else [],
                 ])
-            if mode == Mode.CKT_ENCODE:
-                event_types = batch["event_types"].view(-1).detach().cpu().numpy()
-                mask = batch["mask"].view(-1).detach().cpu().numpy()
-                all_predictions.append(predictions[mask == 1])
-                all_labels.append(event_types[mask == 1])
             if mode == Mode.PREDICT:
                 all_predictions.append(predictions)
                 all_labels.append(batch["labels"].detach().cpu().numpy())
             total_loss += float(loss.detach().cpu().numpy())
             num_batches += 1
 
-    if mode == Mode.PRE_TRAIN:
+    if mode == Mode.PRE_TRAIN or mode == Mode.CKT_ENCODE:
         event_preds = np.concatenate([preds[0] for preds in all_predictions])
         event_labels = np.concatenate([labels[0] for labels in all_labels])
         event_accuracy = metrics.accuracy_score(event_labels, event_preds)
@@ -133,11 +158,6 @@ def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: 
         correctness_labels = np.concatenate([labels[2] for labels in all_labels])
         correctness_accuracy = metrics.accuracy_score(correctness_labels, correctness_preds) if correctness_preds.size else 0
         return total_loss / num_batches, event_accuracy, qid_accuracy, correctness_accuracy
-    if mode == Mode.CKT_ENCODE:
-        event_preds = np.concatenate(all_predictions, axis=0)
-        event_labels = np.concatenate(all_labels, axis=0)
-        event_accuracy = metrics.accuracy_score(event_labels, event_preds)
-        return total_loss / num_batches, event_accuracy
     if mode == Mode.PREDICT:
         all_preds_np = np.concatenate(all_predictions, axis=0)
         all_labels_np = np.concatenate(all_labels, axis=0)
@@ -148,16 +168,13 @@ def evaluate_model(model, validation_loader: torch.utils.data.DataLoader, mode: 
         # Collapse predictions to calculate accuracy and kappa
         all_preds_np[all_preds_np < 0] = 0
         all_preds_np[all_preds_np > 0] = 1
-        if print_examples:
-            # TODO: student id, label, and prediction, for range(5)
-            pass
         # Flatten to handle the multi-label case
         all_preds_np = all_preds_np.flatten()
         all_labels_np = all_labels_np.flatten()
         accuracy = metrics.accuracy_score(all_labels_np, all_preds_np)
         kappa = metrics.cohen_kappa_score(all_labels_np, all_preds_np)
         agg = adj_auc + kappa
-        return total_loss / num_batches, accuracy, adj_auc, kappa, agg
+        return total_loss / num_batches, accuracy, auc, kappa, agg
 
 def train(model, mode: Mode, model_name: str, train_loader, validation_loader, lr=1e-4, weight_decay=1e-6, epochs=200, patience=10):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -180,19 +197,12 @@ def train(model, mode: Mode, model_name: str, train_loader, validation_loader, l
             num_batches += 1
 
         model.eval() # Set model to evaluation mode
-        if mode == Mode.PRE_TRAIN:
+        if mode == Mode.PRE_TRAIN or mode == Mode.CKT_ENCODE:
             train_loss, train_evt_acc, train_qid_acc, train_crct_acc = evaluate_model(model, train_loader, mode)
             val_loss, val_evt_acc, val_qid_acc, val_crct_acc = evaluate_model(model, validation_loader, mode) if validation_loader else (0, 0, 0, 0)
             cur_stats = [epoch, val_loss, val_evt_acc, val_qid_acc, val_crct_acc]
             print(f"Epoch: {epoch + 1}, Train Loss: {train_loss:.3f}, Accuracy: Event: {train_evt_acc:.3f}, QID: {train_qid_acc:.3f}, Correctness: {train_crct_acc:.3f}, "
                 f"Val Loss: {val_loss:.3f}, Accuracy: Event: {val_evt_acc:.3f}, QID: {val_qid_acc:.3f}, Correctness: {val_crct_acc:.3f}, "
-                f"Time: {time.time() - start_time:.2f}")
-        if mode == Mode.CKT_ENCODE:
-            train_loss, train_evt_acc = evaluate_model(model, train_loader, mode)
-            val_loss, val_evt_acc = evaluate_model(model, validation_loader, mode) if validation_loader else (0, 0)
-            cur_stats = [epoch, val_loss, val_evt_acc]
-            print(f"Epoch: {epoch + 1}, Train Loss: {train_loss:.3f}, Accuracy: Event: {train_evt_acc:.3f}, "
-                f"Val Loss: {val_loss:.3f}, Accuracy: Event: {val_evt_acc:.3f}, "
                 f"Time: {time.time() - start_time:.2f}")
         if mode == Mode.PREDICT:
             train_loss, train_accuracy, train_auc, train_kappa, train_agg = evaluate_model(model, train_loader, mode)
@@ -203,9 +213,9 @@ def train(model, mode: Mode, model_name: str, train_loader, validation_loader, l
                 f"Time: {time.time() - start_time:.2f}")
 
         # Save model for best validation metric
-        # if not best_metric or (val_agg > best_metric if mode == Mode.PREDICT else val_loss < best_metric):
+        # if not best_metric or (val_auc > best_metric if mode == Mode.PREDICT else val_loss < best_metric):
         if not best_metric or val_loss < best_metric:
-            # best_metric = val_agg if mode == Mode.PREDICT else val_loss
+            # best_metric = val_auc if mode == Mode.PREDICT else val_loss
             best_metric = val_loss
             best_epoch = epoch
             best_stats = cur_stats
@@ -240,6 +250,7 @@ def pretrain(model_name: str, train_data: List[dict], val_data: List[dict], opti
 
     type_mappings = load_type_mappings()
     model = LSTMModel(Mode.PRE_TRAIN, type_mappings, options, available_qids=get_block_a_qids(type_mappings)).to(device)
+    # model = ClickBERT(Mode.PRE_TRAIN, type_mappings).to(device)
     train(model, Mode.PRE_TRAIN, model_name, train_loader, validation_loader, lr=options.lr, weight_decay=options.weight_decay, epochs=options.epochs, patience=10)
 
 def test_pretrain(model_name: str, data_file: str, options: TrainOptions):
@@ -326,6 +337,8 @@ def train_predictor(pretrain_model_name: str, model_name: str, train_data: List[
 
     num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
     model = create_predictor_model(pretrain_model_name, Mode.PREDICT, type_mappings, options, num_labels=num_labels)
+    # model = ClickBERT(Mode.PREDICT, type_mappings, num_labels).to(device)
+    # model.load_state_dict(torch.load(f"{pretrain_model_name}.pt", map_location=device))
     return train(model, Mode.PREDICT, model_name, train_loader, validation_loader, lr=options.lr, weight_decay=options.weight_decay, epochs=options.epochs, patience=15)
 
 def test_predictor(model_name: str, data_file: str, options: TrainOptions):
@@ -348,6 +361,7 @@ def test_predictor_with_data(model_name: str, test_data: List[dict], options: Tr
     if model_type == "lstm":
         num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
         model = LSTMModel(Mode.PREDICT, type_mappings, options, num_labels=num_labels).to(device)
+        # model = ClickBERT(Mode.PREDICT, type_mappings, num_labels).to(device)
         model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
         model.eval()
     elif model_type == "baseline":
@@ -355,7 +369,7 @@ def test_predictor_with_data(model_name: str, test_data: List[dict], options: Tr
 
     # Test model
     loss, accuracy, auc, kappa, aggregated = evaluate_model(model, test_loader, Mode.PREDICT)
-    print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
+    print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
     return [loss, accuracy, auc, kappa, aggregated]
 
 def train_ckt_encoder_and_split_data(model_name: str, data_file: str, options: TrainOptions):
@@ -365,55 +379,50 @@ def train_ckt_encoder_and_split_data(model_name: str, data_file: str, options: T
 def train_ckt_encoder(model_name: str, train_data: List[dict], val_data: List[dict], options: TrainOptions):
     type_mappings = load_type_mappings()
     qid_to_event_types = get_event_types_by_qid(type_mappings)
-    for qid_str, qid in get_problem_qids("A", type_mappings):
-        print(f"----- {qid_str} ------")
-        train_loader = torch.utils.data.DataLoader(
-            CKTEncoderDataset(train_data, qid, options.concat_visits),
-            collate_fn=CKTEncoderCollator(),
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-            drop_last=True
-        )
-        validation_loader = torch.utils.data.DataLoader(
-            CKTEncoderDataset(val_data, qid, options.concat_visits),
-            collate_fn=CKTEncoderCollator(),
-            batch_size=BATCH_SIZE
-        ) if val_data is not None else None
+    block_a_qids = {qid for _, qid in get_problem_qids("A", type_mappings)}
 
-        q_model_name = f"{model_name}_{qid_str}"
-        model = CKTEncoder(type_mappings, True, qid_to_event_types[qid]).to(device)
-        train(model, Mode.CKT_ENCODE, q_model_name, train_loader, validation_loader, lr=options.lr, weight_decay=options.weight_decay, epochs=options.epochs)
+    train_dataset = Dataset(train_data, type_mappings, qids_for_subseq_split=block_a_qids, concat_visits=options.concat_visits,
+                            log_time=True, qid_seq=False, correctness_seq=options.use_correctness)
+    train_dataset.set_data_class("question_id")
+    train_dataset.sort_by_data_class()
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        collate_fn=Collator(),
+        batch_sampler=Sampler(get_chunk_sizes(train_dataset), BATCH_SIZE)
+    )
+    val_dataset = Dataset(val_data, type_mappings, qids_for_subseq_split=block_a_qids, concat_visits=options.concat_visits,
+                          log_time=True, qid_seq=False, correctness_seq=options.use_correctness)
+    val_dataset.set_data_class("question_id")
+    val_dataset.sort_by_data_class()
+    validation_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        collate_fn=Collator(),
+        batch_sampler=Sampler(get_chunk_sizes(val_dataset))
+    ) if val_data is not None else None
+
+    model = CKTJoint(Mode.CKT_ENCODE, type_mappings, options.use_correctness, qid_to_event_types).to(device)
+    train(model, Mode.CKT_ENCODE, model_name, train_loader, validation_loader, lr=options.lr, weight_decay=options.weight_decay, epochs=options.epochs)
 
 def test_ckt_encoder(model_name: str, data_file: str, options: TrainOptions):
     type_mappings = load_type_mappings()
     qid_to_event_types = get_event_types_by_qid(type_mappings)
+    block_a_qids = {qid for _, qid in get_problem_qids("A", type_mappings)}
+
     test_data = get_data(data_file or "data/test_data.json")
-    for qid_str, qid in get_problem_qids("A", type_mappings):
-        print(f"----- {qid_str} ------")
-        test_loader = torch.utils.data.DataLoader(
-            CKTEncoderDataset(test_data, qid, options.concat_visits),
-            collate_fn=CKTEncoderCollator(),
-            batch_size=BATCH_SIZE
-        )
-        model = CKTEncoder(type_mappings, True, qid_to_event_types[qid]).to(device)
-        model.load_state_dict(torch.load(f"{model_name}_{qid_str}.pt", map_location=device))
-        model.eval()
-        loss, event_accuracy = evaluate_model(model, test_loader, Mode.CKT_ENCODE)
-        print(f"Loss: {loss:.3f}, Accuracy: Event: {event_accuracy:.3f}")
-
-def get_ckt_encoders(encoder_model_name: str, type_mappings: dict, block_a_qids: list):
-    # Load CKT question vector encoder models
-    encoder_models = {}
-    for qid_str, qid in block_a_qids:
-        encoder_model = CKTEncoder(type_mappings, False).to(device)
-        encoder_model.load_state_dict(torch.load(f"{encoder_model_name}_{qid_str}.pt", map_location=device))
-        # For now, just use frozen encoder models
-        for param in encoder_model.parameters():
-            param.requires_grad = False
-        encoder_model.eval()
-        encoder_models[qid] = encoder_model
-
-    return encoder_models
+    test_dataset = Dataset(test_data, type_mappings, qids_for_subseq_split=block_a_qids, concat_visits=options.concat_visits,
+                           log_time=True, qid_seq=False, correctness_seq=options.use_correctness)
+    test_dataset.set_data_class("question_id")
+    test_dataset.sort_by_data_class()
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        collate_fn=Collator(),
+        batch_sampler=Sampler(get_chunk_sizes(test_dataset))
+    )
+    model = CKTJoint(Mode.CKT_ENCODE, type_mappings, options.use_correctness, qid_to_event_types).to(device)
+    model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
+    model.eval()
+    loss, event_accuracy, _, correctness_accuracy = evaluate_model(model, test_loader, Mode.CKT_ENCODE)
+    print(f"Loss: {loss:.3f}, Accuracy: Event: {event_accuracy:.3f}, Correctness: {correctness_accuracy:.3f}")
 
 def train_ckt_predictor_and_split_data(encoder_model_name: str, model_name: str, data_file: str, options: TrainOptions):
     train_data, val_data = get_data(data_file or "data/train_data.json", .8)
@@ -422,54 +431,60 @@ def train_ckt_predictor_and_split_data(encoder_model_name: str, model_name: str,
 
 def train_ckt_predictor(encoder_model_name: str, model_name: str, train_data: List[dict], val_data: List[dict], labels: dict, options: TrainOptions):
     type_mappings = load_type_mappings()
-    block_a_qids = get_problem_qids("A", type_mappings)
-    ckt_encoders = get_ckt_encoders(encoder_model_name, type_mappings, block_a_qids)
+    qid_to_event_types = get_event_types_by_qid(type_mappings)
+    block_a_qids = {qid for _, qid in get_problem_qids("A", type_mappings)}
 
     # Load data
-    qid_set = {qid for _, qid in block_a_qids}
     train_loader = torch.utils.data.DataLoader(
-        CKTPredictorDataset(train_data, ckt_encoders, labels, qid_set, options.concat_visits),
-        collate_fn=CKTPredictorCollator(),
+        CKTPredictorDataset(train_data, labels, block_a_qids, options.concat_visits, options.use_correctness),
+        collate_fn=CKTPredictorCollator(block_a_qids),
         batch_size=BATCH_SIZE,
         shuffle=True,
         drop_last=True
     )
     val_loader = torch.utils.data.DataLoader(
-        CKTPredictorDataset(val_data, ckt_encoders, labels, qid_set, options.concat_visits),
-        collate_fn=CKTPredictorCollator(),
+        CKTPredictorDataset(val_data, labels, block_a_qids, options.concat_visits, options.use_correctness),
+        collate_fn=CKTPredictorCollator(block_a_qids),
         batch_size=BATCH_SIZE
     )
 
     # Create and train model
     num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
-    model = CKTPredictor(options.concat_visits, num_labels, type_mappings, block_a_qids).to(device)
+    model = CKTJoint(Mode.PREDICT, type_mappings, options.use_correctness, qid_to_event_types,
+                     concat_visits=options.concat_visits, num_labels=num_labels, num_input_qids=len(block_a_qids)).to(device)
+    # If the option is set will load all parameters of pretrained model, could just be encoder but also could be prediction head
+    if options.use_pretrained_weights:
+        model.load_params(torch.load(f"{encoder_model_name}.pt", map_location=device))
+    if options.freeze_model:
+        for param in model.encoder.parameters():
+            param.requires_grad = False
     return train(model, Mode.PREDICT, model_name, train_loader, val_loader, options.lr, options.weight_decay, options.epochs)
 
-def test_ckt_predictor(encoder_model_name: str, model_name: str, data_file: str, options: TrainOptions):
+def test_ckt_predictor(model_name: str, data_file: str, options: TrainOptions):
     test_data = get_data(data_file or "data/test_data.json")
-    return test_ckt_predictor_with_data(encoder_model_name, model_name, test_data, options)
+    return test_ckt_predictor_with_data(model_name, test_data, options)
 
-def test_ckt_predictor_with_data(encoder_model_name: str, model_name: str, test_data: List[dict], options: TrainOptions):
+def test_ckt_predictor_with_data(model_name: str, test_data: List[dict], options: TrainOptions):
     type_mappings = load_type_mappings()
-    block_a_qids = get_problem_qids("A", type_mappings)
-    ckt_encoders = get_ckt_encoders(encoder_model_name, type_mappings, block_a_qids)
+    qid_to_event_types = get_event_types_by_qid(type_mappings)
+    block_a_qids = {qid for _, qid in get_problem_qids("A", type_mappings)}
 
     # Load data
     labels = get_labels(options.task, False)
-    qid_set = {qid for _, qid in block_a_qids}
     test_loader = torch.utils.data.DataLoader(
-        CKTPredictorDataset(test_data, ckt_encoders, labels, qid_set, options.concat_visits),
-        collate_fn=CKTPredictorCollator(),
+        CKTPredictorDataset(test_data, labels, block_a_qids, options.concat_visits, options.use_correctness),
+        collate_fn=CKTPredictorCollator(block_a_qids),
         batch_size=BATCH_SIZE
     )
 
     # Load model
     num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
-    model = CKTPredictor(options.concat_visits, num_labels, type_mappings, block_a_qids).to(device)
+    model = CKTJoint(Mode.PREDICT, type_mappings, options.use_correctness, qid_to_event_types,
+                     concat_visits=options.concat_visits, num_labels=num_labels, num_input_qids=len(block_a_qids)).to(device)
     model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
     model.eval()
 
     # Test model
     loss, accuracy, auc, kappa, aggregated = evaluate_model(model, test_loader, Mode.PREDICT)
-    print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, Adj AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
+    print(f"Loss: {loss:.3f}, Accuracy: {accuracy:.3f}, AUC: {auc:.3f}, Kappa: {kappa:.3f}, Agg: {aggregated:.3f}")
     return [loss, accuracy, auc, kappa, aggregated]

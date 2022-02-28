@@ -47,8 +47,9 @@ class TrainOptions:
         self.use_correctness: bool = options.get("use_correctness", True)
         self.use_visit_pt_objs: bool = options.get("use_visit_pt_objs", True)
 
+NUM_CORRECTNESS_STATES = 3
+
 class Correctness(Enum):
     INCOMPLETE = 0
     INCORRECT = 1
     CORRECT = 2
-    WORKING = 3

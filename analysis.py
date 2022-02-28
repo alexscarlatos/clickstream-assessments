@@ -168,6 +168,7 @@ def cluster_irt(model_name: str, data_file: str, options: TrainOptions):
         ("Label", bin_cmap, labels),
         # ("Prediction", bin_cmap, predictions),
         ("Behavior Scalar", quad_cmap, [0 if bv < neg_bv_cutoff else 1 if bv < 0 else 2 if bv < pos_bv_cutoff else 3 for bv in behavior]),
+        # ("Behavior Scalar", "viridis", behavior),
         ("Visits", "viridis", [entry["num_visits"] for entry in data]),
         ("Time Spent", "viridis", [entry["total_time"] for entry in data]),
         ("Num Events", "viridis", [len(entry["event_types"]) for entry in data]),
@@ -209,6 +210,8 @@ def visualize_irt(model_name: str, data_file: str, use_behavior_model: bool, opt
         student_to_param.setdefault(entry["student_id"], 0 if include_behavior else abilities[entry["sid"]])
         if include_behavior:
             student_to_param[entry["student_id"]] += abilities[entry["sid"]] + behavioral_values[idx]
+
+    # TODO: instead of looking at total scores, look at average question score in the test set
 
     student_params = [param for param in student_to_param.values()]
     student_to_score = {seq["student_id"]: seq["block_a_score"] + seq["block_b_score"] for seq in src_data}

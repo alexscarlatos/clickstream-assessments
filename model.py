@@ -1,15 +1,12 @@
 from typing import Dict
 import torch
 from torch import nn
-from constants import Mode, Direction, PredictionState, TrainOptions, ASSISTIVE_EVENT_IDS
+from constants import Mode, Direction, PredictionState, TrainOptions, ASSISTIVE_EVENT_IDS, NUM_CORRECTNESS_STATES
 from utils import device
 
-# TODO: see if one-hot encoding improves performance
 question_embedding_size = 16
 event_type_embedding_size = 16
 hidden_size = 100
-
-num_correctness_states = 4
 
 class LSTMModel(nn.Module):
     def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions, available_qids: torch.BoolTensor = None, num_labels: int = 1, pred_clases: list = None):
@@ -29,9 +26,10 @@ class LSTMModel(nn.Module):
         input_size = question_embedding_size + event_type_embedding_size + 1 # For embedding represetation
         # input_size = self.num_questions + self.num_event_types + 1 # For one-hot representation
         if self.use_correctness:
-            self.correctness_embeddings = torch.eye(num_correctness_states).to(device) # One-hot embedding for correctness states
-            input_size += num_correctness_states
-        self.lstm = nn.LSTM(
+            self.correctness_embeddings = torch.eye(NUM_CORRECTNESS_STATES).to(device) # One-hot embedding for correctness states
+            input_size += NUM_CORRECTNESS_STATES
+        # self.lstm = nn.LSTM(
+        self.lstm = nn.GRU(
             input_size=input_size,
             hidden_size=hidden_size,
             batch_first=True,
@@ -82,7 +80,8 @@ class LSTMModel(nn.Module):
             lstm_input = torch.cat([questions, event_types, time_deltas], dim=-1)
         packed_lstm_input = torch.nn.utils.rnn.pack_padded_sequence(
             lstm_input, lengths=batch["sequence_lengths"], batch_first=True, enforce_sorted=False)
-        packed_lstm_output, (hidden, _) = self.lstm(packed_lstm_input)
+        # packed_lstm_output, (hidden, _) = self.lstm(packed_lstm_input)
+        packed_lstm_output, hidden = self.lstm(packed_lstm_input)
         lstm_output, _ = torch.nn.utils.rnn.pad_packed_sequence(packed_lstm_output, batch_first=True)
 
         if self.mode == Mode.PRE_TRAIN:

@@ -1,11 +1,11 @@
 from typing import Union
 import torch
 from model import LSTMModel
-from ckt_model import CKTPredictor
+from ckt_model import CKTJoint
 from constants import Mode
 
 class IRT(torch.nn.Module):
-    def __init__(self, mode: Mode, num_students: int, num_questions: int, behavior_model: Union[LSTMModel, CKTPredictor]):
+    def __init__(self, mode: Mode, num_students: int, num_questions: int, behavior_model: Union[LSTMModel, CKTJoint]):
         super().__init__()
         self.mode = mode
         self.ability = torch.nn.parameter.Parameter(torch.normal(0.0, 0.1, (num_students,)))

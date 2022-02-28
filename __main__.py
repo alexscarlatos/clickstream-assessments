@@ -125,11 +125,11 @@ if __name__ == "__main__":
             train_predictor_and_split_data(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
     if args.test_predictor:
         if args.ckt:
-            test_ckt_predictor(args.pretrained_name, args.name, args.data_src, TrainOptions(arg_dict))
+            test_ckt_predictor(args.name, args.data_src, TrainOptions(arg_dict))
         else:
             test_predictor(args.name, args.data_src, TrainOptions(arg_dict))
     if args.full_pipeline:
-        full_pipeline(args.pretrained_name, args.name, args.ckt, TrainOptions(arg_dict))
+        full_pipeline(args.pretrained_name, args.name, args.ckt, args.data_classes, TrainOptions(arg_dict))
     if args.ppl:
         get_ppl_performance(args.ppl)
     if args.irt:
