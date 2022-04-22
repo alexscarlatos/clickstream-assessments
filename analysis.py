@@ -1,7 +1,7 @@
 import random
-from math import ceil
+import math
+from typing import List
 import numpy as np
-from sklearn.preprocessing import label_binarize
 import torch
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -9,10 +9,12 @@ from sklearn import manifold, decomposition
 from scipy.stats import pearsonr
 
 from model import LSTMModel
+from joint_model import JointModel
 from irt.irt_training import get_model_for_testing, get_processed_dataset, get_all_problem_qids
 from training import get_data, get_labels
-from data_processing import load_type_mappings
+from data_processing import load_type_mappings, get_problem_qids
 from data_loading import Dataset, Collator
+from per_question_data_loading import PerQuestionDataset, PerQuestionCollator
 from constants import TrainOptions, Mode, Correctness
 from utils import device
 
@@ -35,21 +37,33 @@ def reduce_latent_states(latent_states: np.array, sample_rate: float, perplexity
     reduced_states = reduced_states[sample_idxs]
     return reduced_states, sample_idxs
 
-def render_scatter_plots(data: np.array, reduced_states: np.array, plot_configs: list):
+def render_scatter_plots(data: np.array, reduced_states: np.array, plot_configs: list, labels: List[int] = None):
+    # TODO: using labels will make click callback results incorrect
     # Register the plots based on their definitions
-    num_cols = 2
-    num_rows = ceil(len(plot_configs) / num_cols)
+    num_cols = 2 if len(plot_configs) > 1 else 1
+    num_rows = math.ceil(len(plot_configs) / num_cols)
     fig, axes = plt.subplots(num_rows, num_cols)
     fig.suptitle("Dimension-Reduced Latent State Vectors")
-    for plot_idx, (title, cmap, c_vec) in enumerate(plot_configs):
-        ax = axes[plot_idx] if num_rows == 1 else axes[plot_idx // num_cols, plot_idx % num_cols]
-        scatter = ax.scatter(reduced_states[:,0], reduced_states[:,1], c=c_vec, cmap=cmap, picker=True, pickradius=5)
-        ax.legend(*scatter.legend_elements(), loc='center left', bbox_to_anchor=(1, 0.5), title=title)
+    if labels is not None:
+        correct_states = reduced_states[labels == 1]
+        incorrect_states = reduced_states[labels == 0]
+    for plot_idx, (title, cmap, c_vec, legend_map) in enumerate(plot_configs):
+        ax = axes if len(plot_configs) == 1 else axes[plot_idx] if num_rows == 1 else axes[plot_idx // num_cols, plot_idx % num_cols]
+        add_args = {} if isinstance(cmap, str) else {"vmin": 0, "vmax": len(cmap.colors)}
+        if labels is not None:
+            scatter = ax.scatter(correct_states[:,0], correct_states[:,1], s=100, c=c_vec[labels == 1], cmap=cmap, picker=True, pickradius=5, marker="$\u2713$", **add_args)
+            scatter = ax.scatter(incorrect_states[:,0], incorrect_states[:,1], s=100, c=c_vec[labels == 0], cmap=cmap, picker=True, pickradius=5, marker="x", **add_args)
+        else:
+            scatter = ax.scatter(reduced_states[:,0], reduced_states[:,1], s=15, c=c_vec, cmap=cmap, picker=True, pickradius=5, **add_args)
+        artists, legend_labels = scatter.legend_elements()
+        if legend_map:
+            legend_labels = [legend_map[label] for label in legend_labels]
+        ax.legend(artists, legend_labels, loc='lower left', title=title)#, bbox_to_anchor=(1, 1))
 
     # Define click handler - print information associated with clicked point
     def onpick(event):
         ind = event.ind
-        print(data[ind[0]])
+        print(data[ind[0]]['student_id'])
     fig.canvas.mpl_connect('pick_event', onpick)
 
     # Render the plots
@@ -61,19 +75,41 @@ def cluster(model_name: str, data_file: str, options: TrainOptions):
     # Load data
     data = get_data(data_file or "data/train_data.json")
     data = [seq for seq in data if max(seq["time_deltas"]) < 2000] # Remove time outliers
-    data_loader = torch.utils.data.DataLoader(
-        Dataset(data, type_mappings, labels=get_labels(options.task, True)),
-        collate_fn=Collator(),
-        batch_size=len(data)
-    )
+    labels = get_labels(options.task, True)
 
-    # Load model
-    model = LSTMModel(Mode.CLUSTER, load_type_mappings(), options).to(device)
-    model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
-    model.eval()
+    if options.per_q_arch:
+        block_a_qids = {qid for _, qid in get_problem_qids("A", type_mappings)}
+        data_loader = torch.utils.data.DataLoader(
+            PerQuestionDataset(data, labels, block_a_qids, False, True, options.concat_visits, options.use_correctness),
+            collate_fn=PerQuestionCollator(block_a_qids),
+            batch_size=len(data)
+        )
+        num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
+        model = JointModel(Mode.CLUSTER, type_mappings, options, num_labels=num_labels, num_input_qids=len(block_a_qids)).to(device)
+        model.load_params(torch.load(f"{model_name}.pt", map_location=device))
+
+        # dataset = Dataset(data, type_mappings, qids_for_subseq_split={1}, concat_visits=options.concat_visits, correct_as_label=True,
+        #                   time_ratios=True, log_time=False, qid_seq=True, correctness_seq=options.use_correctness)
+        # data_loader = torch.utils.data.DataLoader(
+        #     dataset,
+        #     collate_fn=Collator(),
+        #     batch_size=len(dataset)
+        # )
+        # print(len(data_loader))
+        # model = LSTMModel(Mode.CLUSTER, type_mappings, options).to(device)
+        # model.load_state_dict({key[8:]: val for key, val in torch.load(f"{model_name}.pt", map_location=device).items() if key.startswith("encoder")})
+    else:
+        data_loader = torch.utils.data.DataLoader(
+            Dataset(data, type_mappings, labels=labels),
+            collate_fn=Collator(),
+            batch_size=len(data)
+        )
+        model = LSTMModel(Mode.CLUSTER, load_type_mappings(), options).to(device)
+        model.load_state_dict(torch.load(f"{model_name}.pt", map_location=device))
 
     # Extract latent state with label and prediction for each sequence in the dataset
     print("Extracting latent states")
+    model.eval()
     with torch.no_grad():
         for batch in data_loader:
             latent_states, predictions = model(batch)
@@ -84,32 +120,36 @@ def cluster(model_name: str, data_file: str, options: TrainOptions):
             labels = batch["labels"].detach().cpu().numpy()
 
     # Get dimension-reduced latent states
-    reduced_states, sample_idxs = reduce_latent_states(latent_states, 1.0)
+    reduced_states, sample_idxs = reduce_latent_states(latent_states, 1, perplexity=30)
     data = np.array(data)[sample_idxs]
     labels = labels[sample_idxs]
     predictions = predictions[sample_idxs]
 
     # Define the plots to be shown
     bin_cmap = ListedColormap(["red", "blue"])
+    bin_label_map = {
+        "$\\mathdefault{0}$": "Below Average",
+        "$\\mathdefault{1}$": "Above Average"
+    }
     num_visited_questions = [len([qs for qs in seq["q_stats"].values() if qs["visits"]]) for seq in data]
     plots = [
-        ("Label", bin_cmap, labels), # Good
-        # ("Prediction", bin_cmap, predictions), # Good
-        ("Block A Score", "viridis", [seq["block_a_score"] for seq in data]), # Good
-        ("Num Events", "viridis", [len(seq["event_types"]) for seq in data]), # Good
-        ("Questions Attempted", "viridis", [sum(qs["correct"] != Correctness.INCOMPLETE.value for qs in seq["q_stats"].values()) for seq in data]), # Good
-        # ("Questions Visited", "viridis", num_visited_questions), # Very similar to questions attempted
-        ("Total Time", "viridis", [min(max(seq["time_deltas"]), 1800) for seq in data]), # Good
-        # ("Avg. Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) / len([qs for qs in seq["q_stats"].values() if qs["visits"]]) for seq in data]), # Not Great
-        # ("Num Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) for seq in data]), # Not Great
+        ("Label", bin_cmap, labels, bin_label_map), # Good
+        # ("Prediction", bin_cmap, predictions, None), # Good
+        # ("Block A Score", "viridis", [seq["block_a_score"] for seq in data], None), # Good
+        # ("Num Events", "viridis", [math.log10(len(seq["event_types"])) for seq in data], None), # Good
+        # ("Questions Attempted", "viridis", [sum(qs["correct"] != Correctness.INCOMPLETE.value for qs in seq["q_stats"].values()) for seq in data], None), # Good
+        # ("Questions Visited", "viridis", num_visited_questions, None), # Very similar to questions attempted
+        # ("Total Time", "viridis", [min(max(seq["time_deltas"]), 1800) for seq in data], None), # Good
+        # ("Avg. Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) / len([qs for qs in seq["q_stats"].values() if qs["visits"]]) for seq in data], None), # Not Great
+        # ("Num Visits", "viridis", [sum(qs["visits"] for qs in seq["q_stats"].values()) for seq in data], None), # Good
         # ("Avg. Time Spent", "viridis", [
         #     min(
         #         sum(qs["time"] for qs in seq["q_stats"].values()) / num_visited_questions[seq_idx],
         #         1800 / num_visited_questions[seq_idx] # Min since some sequences have messed up timestamps and we don't want outliers
         #     )
         #     for seq_idx, seq in enumerate(data)
-        # ]), # Not Great
-        # ("Std. Time Spent", "viridis", [np.array([qs["time"] for qs in seq["q_stats"].values()]).std() for seq in data]), # Not Great
+        # ], None), # Not Great
+        # ("Std. Time Spent", "viridis", [np.array([qs["time"] for qs in seq["q_stats"].values()]).std() for seq in data], None), # Not Great
     ]
 
     # Render the plots
@@ -119,12 +159,22 @@ def cluster_irt(model_name: str, data_file: str, options: TrainOptions):
     # Get dataset
     type_mappings = load_type_mappings()
     src_data = get_data(data_file)
-    problem_qids = {2}
-    data = get_processed_dataset(src_data, type_mappings, False, problem_qids, options)
+    problem_qids = {2} # MCSS
+    # problem_qids = {3} # MCSS
+    # problem_qids = {4} # MatchMS
+    # problem_qids = {7} # MultipleFillInBlank
+    # problem_qids = {13} # CompositeCR - FillInBlank
+    # problem_qids = {14} # FillInBlank
+    # problem_qids = {27} # GridMS
+    # problem_qids = {30} # MCSS
+    # problem_qids = {36} # ZonesMS
+    # problem_qids = {37} # CompositeCR - ZonesMS, MultipleFillInBlank
+    # problem_qids = {qid for _, qid in get_problem_qids("A", type_mappings) + get_problem_qids("B", type_mappings)}
+    data = get_processed_dataset(src_data, type_mappings, False, problem_qids, options.concat_visits)
     data_loader = torch.utils.data.DataLoader(
         data,
         collate_fn=Collator(),
-        batch_size=1000
+        batch_size=options.batch_size
     )
 
     # Get model
@@ -149,8 +199,8 @@ def cluster_irt(model_name: str, data_file: str, options: TrainOptions):
     labels = np.concatenate(label_batches, axis=0)
     neg_bv = sorted(behavior[behavior <= 0])
     pos_bv = sorted(behavior[behavior > 0])
-    neg_bv_cutoff = neg_bv[len(neg_bv) // 2]
-    pos_bv_cutoff = pos_bv[len(pos_bv) // 2]
+    neg_bv_cutoff = neg_bv[len(neg_bv) // 2] if neg_bv else 0
+    pos_bv_cutoff = pos_bv[len(pos_bv) // 2] if pos_bv else 0
     predictions[predictions < 0] = 0
     predictions[predictions > 0] = 1
 
@@ -164,26 +214,32 @@ def cluster_irt(model_name: str, data_file: str, options: TrainOptions):
     # Define the plots to be shown
     bin_cmap = ListedColormap(["red", "blue"])
     quad_cmap = ListedColormap([(1, 0, 0), (1, .5, .5), (.5, .5, 1), (0, 0, 1)])
+    quad_label_map = {
+        "$\\mathdefault{0}$": "< 50% Neg.",
+        "$\\mathdefault{1}$": "> 50% Neg.",
+        "$\\mathdefault{2}$": "< 50% Pos.",
+        "$\\mathdefault{3}$": "> 50% Pos."
+    }
     plots = [
-        ("Label", bin_cmap, labels),
-        # ("Prediction", bin_cmap, predictions),
-        ("Behavior Scalar", quad_cmap, [0 if bv < neg_bv_cutoff else 1 if bv < 0 else 2 if bv < pos_bv_cutoff else 3 for bv in behavior]),
-        # ("Behavior Scalar", "viridis", behavior),
-        ("Visits", "viridis", [entry["num_visits"] for entry in data]),
-        ("Time Spent", "viridis", [entry["total_time"] for entry in data]),
-        ("Num Events", "viridis", [len(entry["event_types"]) for entry in data]),
-        ("Max Time Gap", "viridis", [entry["max_gap"] for entry in data])
+        ("Label", bin_cmap, labels, None),
+        # ("Prediction", bin_cmap, predictions, None),
+        ("Behavior Scalar", quad_cmap, np.array([0 if bv < neg_bv_cutoff else 1 if bv < 0 else 2 if bv < pos_bv_cutoff else 3 for bv in behavior]), quad_label_map),
+        # ("Behavior Scalar", "viridis", behavior, None),
+        ("Visits", "viridis", [entry["num_visits"] for entry in data], None),
+        ("Time Spent", "viridis", [entry["total_time"] for entry in data], None),
+        ("Num Events", "viridis", [len(entry["event_types"]) for entry in data], None),
+        ("Max Time Gap", "viridis", [entry["max_gap"] for entry in data], None)
     ]
 
     # Render the plots
-    render_scatter_plots(data, reduced_states, plots)
+    render_scatter_plots(data, reduced_states, plots)#, labels=labels)
 
 def visualize_irt(model_name: str, data_file: str, use_behavior_model: bool, options: TrainOptions):
     # Get dataset
     type_mappings = load_type_mappings()
     src_data = get_data(data_file)
     problem_qids = get_all_problem_qids(type_mappings)
-    data = get_processed_dataset(src_data, type_mappings, False, problem_qids, options)
+    data = get_processed_dataset(src_data, type_mappings, False, problem_qids, options.concat_visits)
     data_loader = torch.utils.data.DataLoader(
         data,
         collate_fn=Collator(),

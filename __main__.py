@@ -10,7 +10,7 @@ from analysis import cluster, cluster_irt, visualize_irt, block_scores
 from experiments import full_pipeline, get_ppl_performance
 from utils import initialize_seeds, device
 from constants import TrainOptions, PredictionState, Direction
-from irt.irt_training import irt, test_irt
+from irt.irt_training import irt
 
 LSTM_DIRS = {
     "fwd": Direction.FWD,
@@ -53,10 +53,10 @@ if __name__ == "__main__":
     parser.add_argument("--full_pipeline", help="Perform cross-validation on pretraining/fine-tuning pipeline", action="store_true")
     parser.add_argument("--ppl")
     parser.add_argument("--irt", help="Train IRT model", action="store_true")
-    parser.add_argument("--test_irt", action="store_true")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight_decay", type=float)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch_size", type=int)
     parser.add_argument("--mixed_time", action="store_true")
     parser.add_argument("--random_trim", action="store_true")
     parser.add_argument("--lstm_dir", help="LSTM direction", choices=list(LSTM_DIRS.keys()))
@@ -72,6 +72,14 @@ if __name__ == "__main__":
     parser.add_argument("--multi_head", type=bool_type)
     parser.add_argument("--use_correctness", type=bool_type)
     parser.add_argument("--use_visit_pt_objs", type=bool_type)
+    parser.add_argument("--do_pretraining", type=bool_type)
+    parser.add_argument("--do_fine_tuning", type=bool_type)
+    parser.add_argument("--from_scratch", type=bool_type)
+    parser.add_argument("--predict_event_type", type=bool_type)
+    parser.add_argument("--predict_time", type=bool_type)
+    parser.add_argument("--predict_correctness", type=bool_type)
+    parser.add_argument("--predict_qid", type=bool_type)
+    parser.add_argument("--per_q_arch", type=bool_type)
     parser.add_argument("--use_behavior_model", help="For IRT, use behavior-enhanced formulation", action="store_true")
     parser.add_argument("--cluster", action="store_true")
     parser.add_argument("--cluster_irt", action="store_true")
@@ -134,8 +142,6 @@ if __name__ == "__main__":
         get_ppl_performance(args.ppl)
     if args.irt:
         irt(args.pretrained_name, args.name, args.data_src, args.use_behavior_model, args.ckt, TrainOptions(arg_dict))
-    if args.test_irt:
-        test_irt(args.name, args.data_src, args.use_behavior_model, args.ckt, TrainOptions(arg_dict))
     if args.cluster:
         cluster(args.name, args.data_src, TrainOptions(arg_dict))
     if args.cluster_irt:

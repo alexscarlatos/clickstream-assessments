@@ -9,27 +9,26 @@ event_type_embedding_size = 16
 hidden_size = 100
 
 class LSTMModel(nn.Module):
-    def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions, available_qids: torch.BoolTensor = None, num_labels: int = 1, pred_clases: list = None):
+    def __init__(self, mode: Mode, type_mappings: Dict[str, list], options: TrainOptions, available_qids: torch.BoolTensor = None,
+                 num_labels: int = 1, pred_classes: list = None, use_qid: bool = True):
         super().__init__()
         self.options = options
         self.mode = mode
+        self.use_qid = use_qid
         self.num_questions = len(type_mappings["question_ids"])
         self.available_qids = available_qids
         self.num_event_types = len(type_mappings["event_types"])
         self.question_embeddings = nn.Embedding(self.num_questions, question_embedding_size)
         self.event_type_embeddings = nn.Embedding(self.num_event_types, event_type_embedding_size)
 
-        # self.question_one_hot = torch.eye(self.num_questions).to(device)
-        # self.event_one_hot = torch.eye(self.num_event_types).to(device)
-
         self.use_correctness = options.use_correctness
-        input_size = question_embedding_size + event_type_embedding_size + 1 # For embedding represetation
-        # input_size = self.num_questions + self.num_event_types + 1 # For one-hot representation
+        input_size = event_type_embedding_size + 1
+        if self.use_qid:
+            input_size += question_embedding_size
         if self.use_correctness:
             self.correctness_embeddings = torch.eye(NUM_CORRECTNESS_STATES).to(device) # One-hot embedding for correctness states
             input_size += NUM_CORRECTNESS_STATES
-        # self.lstm = nn.LSTM(
-        self.lstm = nn.GRU(
+        self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             batch_first=True,
@@ -51,37 +50,37 @@ class LSTMModel(nn.Module):
                 self.attention = nn.ModuleDict()
                 self.hidden_layers = nn.ModuleDict()
                 self.pred_output_layer = nn.ModuleDict()
-                all_classes = pred_clases or ["10", "20", "30"]
+                all_classes = pred_classes or ["10", "20", "30"]
                 for data_class in all_classes:
                     self.attention[data_class] = nn.Linear(output_size, 1)
                     self.hidden_layers[data_class] = nn.Sequential(
                         nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(output_size, output_size))
                     self.pred_output_layer[data_class] = nn.Sequential(
-                        nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(final_layer_size, num_labels))
+                        nn.Dropout(options.dropout), nn.Linear(final_layer_size, num_labels))
             else:
                 self.attention = nn.Linear(output_size, 1)
                 self.hidden_layers = nn.Sequential(
                     nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(output_size, output_size))
                 self.pred_output_layer = nn.Sequential(
-                    nn.Dropout(options.dropout), nn.ReLU(), nn.Linear(final_layer_size, num_labels))
+                    nn.Dropout(options.dropout), nn.Linear(final_layer_size, num_labels))
 
     def forward(self, batch):
         batch_size = batch["event_types"].shape[0]
-        questions = self.question_embeddings(batch["question_ids"])
-        event_types = self.event_type_embeddings(batch["event_types"])
-        # questions = self.question_one_hot[batch["question_ids"]]
-        # event_types = self.event_one_hot[batch["event_types"]]
-        time_deltas = batch["time_deltas"].unsqueeze(2) # Add a third dimension to be able to concat with embeddings
 
+        # Construct input and run through LSTM
+        event_types = self.event_type_embeddings(batch["event_types"])
+        time_deltas = batch["time_deltas"].unsqueeze(2) # Add a third dimension to be able to concat with embeddings
+        input_tensors = [event_types, time_deltas]
+        if self.use_qid:
+            questions = self.question_embeddings(batch["question_ids"])
+            input_tensors.append(questions)
         if self.use_correctness:
             correctness = self.correctness_embeddings[batch["correctness"]]
-            lstm_input = torch.cat([questions, event_types, correctness, time_deltas], dim=-1)
-        else:
-            lstm_input = torch.cat([questions, event_types, time_deltas], dim=-1)
+            input_tensors.append(correctness)
+        lstm_input = torch.cat(input_tensors, dim=-1)
         packed_lstm_input = torch.nn.utils.rnn.pack_padded_sequence(
             lstm_input, lengths=batch["sequence_lengths"], batch_first=True, enforce_sorted=False)
-        # packed_lstm_output, (hidden, _) = self.lstm(packed_lstm_input)
-        packed_lstm_output, hidden = self.lstm(packed_lstm_input)
+        packed_lstm_output, (hidden, _) = self.lstm(packed_lstm_input)
         lstm_output, _ = torch.nn.utils.rnn.pad_packed_sequence(packed_lstm_output, batch_first=True)
 
         if self.mode == Mode.PRE_TRAIN:
@@ -100,21 +99,42 @@ class LSTMModel(nn.Module):
                 full_output = forward_output
             full_output *= batch["mask"].unsqueeze(2) # Mask to prevent info leakage at end of sequence before padding
 
-            event_predictions = self.event_pred_layer(full_output)
-            # Get cross-entropy loss of predictions with labels, note that this automatically performs the softmax step
-            event_loss_fn = nn.CrossEntropyLoss(reduction="none")
-            # Loss function expects 2d matrix, so compute with all sequences from all batches in single array
-            event_loss = event_loss_fn(event_predictions.view(-1, self.num_event_types), batch["event_types"].view(-1))
+            # Prediction loss at each time step
+            loss = torch.zeros(batch_size * full_output.shape[1]).to(device)
 
-            time_predictions = self.time_pred_layer(full_output)
-            # Get cross-entropy loss of time predictions with time interpolation at each step, sigmoid performed implicitly
-            time_loss_fn = nn.BCEWithLogitsLoss(reduction="none")
-            # All sequences unrolled into single array for loss calculation
-            time_loss = time_loss_fn(time_predictions.view(-1), batch["time_ratios"].view(-1))
+            event_predictions = None
+            if self.options.predict_event_type:
+                event_predictions = self.event_pred_layer(full_output)
+                # Get cross-entropy loss of predictions with labels, note that this automatically performs the softmax step
+                event_loss_fn = nn.CrossEntropyLoss(reduction="none")
+                # Loss function expects 2d matrix, so compute with all sequences from all batches in single array
+                event_loss = event_loss_fn(event_predictions.view(-1, self.num_event_types), batch["event_types"].view(-1))
+                loss += event_loss
+
+            time_predictions = None
+            if self.options.predict_time:
+                time_predictions = self.time_pred_layer(full_output)
+                # Get cross-entropy loss of time predictions with time interpolation at each step, sigmoid performed implicitly
+                time_loss_fn = nn.BCEWithLogitsLoss(reduction="none")
+                # All sequences unrolled into single array for loss calculation
+                time_loss = time_loss_fn(time_predictions.view(-1), batch["time_ratios"].view(-1))
+                loss += time_loss
+
+            # For per-question architecture, predict visit-level features at each time step
+            qid_predictions = None
+            correctness_predictions = None
+            if self.options.per_q_arch:
+                if self.options.predict_qid:
+                    qid_predictions = self.qid_pred_layer(full_output)
+                    qid_loss = nn.CrossEntropyLoss(reduction="none")(qid_predictions.view(-1, self.num_questions), batch["question_ids"].view(-1))
+                    loss += qid_loss
+                if self.use_correctness and self.options.predict_correctness:
+                    correctness_predictions = self.correctness_pred_layer(full_output)
+                    correctness_loss = nn.CrossEntropyLoss(reduction="none")(correctness_predictions.view(-1, 3), batch["correctness"].view(-1))
+                    loss += correctness_loss
 
             # Get event-level prediction loss
-            loss = event_loss + time_loss
-            loss = loss * batch["mask"].view(-1) # Don't count loss for indices within the padding of the sequences
+            loss *= batch["mask"].view(-1) # Don't count loss for indices within the padding of the sequences
             avg_loss = loss.mean()
 
             # Visit-level pretraining objectives - predict question id and correctness of each visit to each question
@@ -151,16 +171,15 @@ class LSTMModel(nn.Module):
                 avg_visit_loss = visit_loss.mean()
                 avg_loss += avg_visit_loss
 
-            # Get collapsed predictions
-            predicted_event_types = torch.max(event_predictions, dim=-1)[1].view(-1).detach().cpu().numpy() # Get indices of max values of predicted event vectors
-            predicted_qids = torch.max(qid_predictions, dim=-1)[1].view(-1).detach().cpu().numpy() if self.options.use_visit_pt_objs else None
-            predicted_correctness = torch.max(correctness_predictions, dim=-1)[1].view(-1).detach().cpu().numpy() if self.options.use_visit_pt_objs and self.use_correctness else None
+            # Get collapsed predictions, take index of maximally predicted class for each sequence
+            predicted_event_types = torch.max(event_predictions, dim=-1)[1].view(-1).detach().cpu().numpy() if event_predictions is not None else None
+            predicted_qids = torch.max(qid_predictions, dim=-1)[1].view(-1).detach().cpu().numpy() if qid_predictions is not None else None
+            predicted_correctness = torch.max(correctness_predictions, dim=-1)[1].view(-1).detach().cpu().numpy() if correctness_predictions is not None else None
 
             return avg_loss, (predicted_event_types, predicted_qids, predicted_correctness)
 
         if self.mode in (Mode.PREDICT, Mode.CLUSTER, Mode.IRT):
-            # import pdb; pdb.set_trace()
-            data_class = batch["data_class"]
+            data_class = batch.get("data_class")
             attention = self.attention[data_class] if self.options.multi_head else self.attention
             hidden_layers = self.hidden_layers[data_class] if self.options.multi_head else self.hidden_layers
             pred_output_layer = self.pred_output_layer[data_class] if self.options.multi_head else self.pred_output_layer
@@ -198,6 +217,10 @@ class LSTMModel(nn.Module):
             # Append engineered features to latent state if needed (note that we don't want this )
             if self.options.engineered_features:
                 pred_state = torch.cat([pred_state, batch["engineered_features"]], dim=1)
+
+            # For per-question architecture, return prediction state for use by higher level model
+            if self.options.per_q_arch:
+                return pred_state
 
             predictions = pred_output_layer(pred_state)
             if self.num_labels == 1:

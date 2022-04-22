@@ -90,7 +90,7 @@ def get_sub_sequences(sequence: dict, question_ids: set, concat_visits, log_time
                 "question_id": qid,
                 "question_type": sequence["question_types"][start_idx],
                 "event_types": sequence["event_types"][start_idx : last_idx + 1],
-                "time_deltas": sequence["time_deltas"][start_idx : last_idx + 1],
+                "time_deltas": np.array(sequence["time_deltas"][start_idx : last_idx + 1]),
                 "num_visits": 1,
                 "max_gap": 0,
                 "complete": sequence["correctness"][last_idx] != Correctness.INCOMPLETE.value,
@@ -268,7 +268,7 @@ class Collator:
             trim_max = 30 * 60
             trim_at = random.randint(1, trim_max / trim_length) * trim_length
 
-        assert all(seq["data_class"] == batch[0]["data_class"] for seq in batch) # TODO: remove after verifying
+        assert all(seq["data_class"] == batch[0]["data_class"] for seq in batch)
 
         for sequence in batch:
             # Convert data structures to torch tensors

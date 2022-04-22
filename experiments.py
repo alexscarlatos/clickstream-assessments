@@ -11,6 +11,7 @@ from constants import TrainOptions
 
 def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, data_classes: List[str], options: TrainOptions):
     test_data_from_train_data = False
+    test_only = False
 
     # Get train and test data
     if options.mixed_time:
@@ -72,13 +73,12 @@ def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, data_classes
 
         print("\nPretraining Phase")
         options.lr = 1e-3
-        options.epochs = 150 if ckt else 100
+        options.epochs = 150 if ckt else 150 # 100
         options.weight_decay = 1e-6
         # Just pretrain on 30-minute data if using mixed training data
         train_data_for_pt = train_data[len(train_data_idx) * 2:] if options.mixed_time else train_data
         val_data_for_pt = val_data[len(val_data_idx) * 2:] if options.mixed_time else val_data
-        do_pretrain = True
-        if do_pretrain:
+        if options.do_pretraining and not options.from_scratch and not test_only:
             if ckt:
                 train_ckt_encoder(cur_pretrained_name, train_data_for_pt, val_data_for_pt, options)
             else:
@@ -86,44 +86,60 @@ def full_pipeline(pretrained_name: str, model_name: str, ckt: bool, data_classes
 
         initialize_seeds(221) # Re-initialize seeds so that the following will be exactly the same whether or not we skip pretraing
 
-        print("\nTrain classifier on frozen LSTM")
-        options.lr = 5e-4 if ckt else 5e-3
-        options.epochs = 50 if ckt else 100
-        options.weight_decay = 1e-2
-        options.use_pretrained_embeddings = True
-        options.use_pretrained_weights = True
-        options.use_pretrained_head = False
-        options.freeze_embeddings = True
-        options.freeze_model = True
-        if ckt:
-            val_stats = train_ckt_predictor(cur_pretrained_name, cur_model_name, train_data, val_data, train_label_dict, options)
-            test_stats = test_ckt_predictor_with_data(cur_model_name, test_data, options)
+        if not options.from_scratch:
+            print("\nTrain classifier on frozen model")
+            options.lr = 5e-4 if ckt else 5e-3
+            options.epochs = 50 if ckt else 100
+            options.weight_decay = 1e-6
+            options.use_pretrained_embeddings = True
+            options.use_pretrained_weights = True
+            options.use_pretrained_head = False
+            options.freeze_embeddings = True
+            options.freeze_model = True
+            if ckt:
+                if not test_only:
+                    val_stats = train_ckt_predictor(cur_pretrained_name, cur_model_name, train_data, val_data, train_label_dict, options)
+                test_stats = test_ckt_predictor_with_data(cur_model_name, test_data, options)
+            else:
+                if not test_only:
+                    val_stats = train_predictor(cur_pretrained_name, cur_model_name, train_data, val_data, train_label_dict, options)
+                test_stats = test_predictor_with_data(cur_model_name, test_data, options)
+            if test_only:
+                val_stats = [0] * (len(test_stats) + 1)
+            all_frozen_stats.append(val_stats + test_stats)
         else:
-            val_stats = train_predictor(cur_pretrained_name, cur_model_name, train_data, val_data, train_label_dict, options)
-            test_stats = test_predictor_with_data(cur_model_name, test_data, options)
-            # val_stats = [0] * (len(test_stats) + 1)
-        all_frozen_stats.append(val_stats + test_stats)
+            all_frozen_stats.append([0] * 11)
 
-        fine_tune = True
-        if not fine_tune:
+        if options.do_fine_tuning:
+            print("\nFine-tune model for classifier")
+            options.weight_decay = 1e-6
+            if options.from_scratch:
+                options.lr = 1e-3
+                options.epochs = 100
+                options.use_pretrained_head = False
+                options.use_pretrained_embeddings = False
+                options.use_pretrained_weights = False
+            else:
+                options.lr = 5e-5 if ckt else 5e-5
+                options.epochs = 50 if ckt else 50
+                options.use_pretrained_head = True
+                options.use_pretrained_embeddings = True
+                options.use_pretrained_weights = True
+            options.freeze_embeddings = False
+            options.freeze_model = False
+            if ckt:
+                if not test_only:
+                    val_stats = train_ckt_predictor(cur_model_name, cur_model_ft_name, train_data, val_data, train_label_dict, options)
+                test_stats = test_ckt_predictor_with_data(cur_model_ft_name, test_data, options)
+            else:
+                if not test_only:
+                    val_stats = train_predictor(cur_model_name, cur_model_ft_name, train_data, val_data, train_label_dict, options)
+                test_stats = test_predictor_with_data(cur_model_ft_name, test_data, options)
+            if test_only:
+                val_stats = [0] * (len(test_stats) + 1)
+            all_ft_stats.append(val_stats + test_stats)
+        else:
             all_ft_stats.append([0] * (len(val_stats) * 2))
-            continue
-
-        print("\nFine-tune LSTM for classifier")
-        options.lr = 5e-5 if ckt else 5e-5
-        options.epochs = 50
-        options.weight_decay = 10
-        options.use_pretrained_head = True
-        options.freeze_embeddings = False
-        options.freeze_model = False
-        if ckt:
-            val_stats = train_ckt_predictor(cur_model_name, cur_model_ft_name, train_data, val_data, train_label_dict, options)
-            test_stats = test_ckt_predictor_with_data(cur_model_ft_name, test_data, options)
-        else:
-            val_stats = train_predictor(cur_model_name, cur_model_ft_name, train_data, val_data, train_label_dict, options)
-            test_stats = test_predictor_with_data(cur_model_ft_name, test_data, options)
-            # val_stats = [0] * (len(test_stats) + 1)
-        all_ft_stats.append(val_stats + test_stats)
 
     stat_template = "Epoch: {:.3f}, Val Loss: {:.3f}, Acc: {:.3f}, AUC: {:.3f}, Kap: {:.3f}, Agg: {:.3f}, Test Loss: {:.3f}, Acc: {:.3f}, AUC: {:.3f}, Kap: {:.3f}, Agg: {:.3f}"
 

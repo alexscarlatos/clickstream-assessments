@@ -24,11 +24,12 @@ class PredictionState(Enum):
 
 class TrainOptions:
     def __init__(self, options: dict):
-        self.task: str = options.get("task", "comp")
+        self.task: str = options.get("task", "score")
 
         self.lr: float = options.get("lr", 1e-4)
         self.weight_decay: bool = options.get("weight_decay", 1e-6)
         self.epochs: int = options.get("epochs", 100)
+        self.batch_size: int = options.get("batch_size", 64)
         self.mixed_time: bool = options.get("mixed_time", False)
         self.random_trim: bool = options.get("random_trim", False)
         self.concat_visits: bool = options.get("concat_visits", True)
@@ -39,13 +40,21 @@ class TrainOptions:
         self.use_pretrained_head: bool = options.get("pretrained_head", False)
         self.freeze_model: bool = options.get("freeze_model", True)
         self.freeze_embeddings: bool = options.get("freeze_emb", True)
-        self.prediction_state: PredictionState = options.get("pred_state", PredictionState.BOTH_CONCAT)
+        self.prediction_state: PredictionState = options.get("pred_state", PredictionState.ATTN)
         self.dropout: float = options.get("dropout", 0.25)
         self.hidden_ff_layer: bool = options.get("hidden_ff_layer", False)
         self.engineered_features: bool = options.get("eng_feat", False)
         self.multi_head: bool = options.get("multi_head", False)
         self.use_correctness: bool = options.get("use_correctness", True)
         self.use_visit_pt_objs: bool = options.get("use_visit_pt_objs", True)
+        self.do_pretraining: bool = options.get("do_pretraining", True)
+        self.do_fine_tuning: bool = options.get("do_fine_tuning", True)
+        self.from_scratch: bool = options.get("from_scratch", False)
+        self.predict_event_type: bool = options.get("predict_event_type", True)
+        self.predict_time: bool = options.get("predict_time", True)
+        self.predict_correctness: bool = options.get("predict_correctness", True)
+        self.predict_qid: bool = options.get("predict_qid", False)
+        self.per_q_arch: bool = options.get("per_q_arch", True)
 
 NUM_CORRECTNESS_STATES = 3
 

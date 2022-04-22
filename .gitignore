@@ -1,5 +1,15 @@
 *.pyc
+*.7z
+*.jpg
+*.mp4
+*.pdf
+
 models/*
 data/*
 src_data/*
 figures/*
+diagrams/*
+naep-competition-submission
+EDM-template
+590ed_hw4
+NAEP.ipynb

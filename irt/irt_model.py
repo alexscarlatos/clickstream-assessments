@@ -25,6 +25,8 @@ class IRT(torch.nn.Module):
             else:
                 behavior = self.behavior_model(batch)
                 predictions += behavior
+        else:
+            predictions = ability - difficulty
 
         loss_fn = torch.nn.BCEWithLogitsLoss(reduction="mean")
         avg_loss = loss_fn(predictions, batch["labels"])
