@@ -18,7 +18,6 @@ class JointModel(nn.Module):
         super().__init__()
         self.mode = mode
         self.num_labels = num_labels
-        question_ids = sorted(type_mappings["question_ids"].values())
         self.encoding_size = hidden_size * 2
         self.concat_visits = options.concat_visits
         self.encoder = LSTMModel(mode, type_mappings, options)
@@ -34,9 +33,6 @@ class JointModel(nn.Module):
                 )
             else:
                 # Construct RNN that takes encoding and question id of each visit
-                # num_questions = len(question_ids)
-                # self.question_embeddings = torch.eye(num_questions).to(device)
-                # input_size = self.encoding_size + num_questions
                 input_size = self.encoding_size
                 self.rnn = nn.GRU(input_size=input_size, hidden_size=self.rnn_hidden_size, batch_first=True)
                 self.pred_layer = nn.Sequential(
@@ -65,7 +61,7 @@ class JointModel(nn.Module):
         max_seq_len = max(batch["sequence_lengths"])
         all_encodings = torch.zeros((batch_size * max_seq_len, self.encoding_size)).to(device)
         # Run each question-specific encoder on all sub-sequences of that question
-        for qid, sub_batch in batch["questions"].items():
+        for _, sub_batch in batch["questions"].items():
             encodings = self.encoder(sub_batch)
             # Assign resulting encodings to their corresponding places in the encoding matrix
             all_encodings[sub_batch["target_idxs"]] = encodings
@@ -76,8 +72,6 @@ class JointModel(nn.Module):
         if self.concat_visits:
             predictions = self.predictor(pred_state)
         else:
-            # qids = self.question_embeddings[batch["question_ids"]]
-            # rnn_input = torch.cat([all_encodings.view(batch_size, max_seq_len, self.encoding_size), qids], dim=2)
             rnn_input = all_encodings.view(batch_size, max_seq_len, self.encoding_size)
             packed_rnn_input = torch.nn.utils.rnn.pack_padded_sequence(
                 rnn_input, lengths=batch["sequence_lengths"], batch_first=True, enforce_sorted=False)

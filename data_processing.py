@@ -353,10 +353,10 @@ def convert_raw_data_to_json(data_filenames: List[str], output_filename: str, bl
                 }
 
                 if q_correctness == Correctness.CORRECT:
-                    block = qa_key[qid]["block"]
-                    if block == "A":
+                    q_block = qa_key[qid]["block"]
+                    if q_block == "A":
                         seq["block_a_score"] += 1
-                    elif block == "B":
+                    elif q_block == "B":
                         seq["block_b_score"] += 1
 
         final_data += list(student_to_sequences.values())

@@ -45,10 +45,10 @@ class PerQuestionCollator:
         question_id_batches = []
         labels = []
 
-        # Each sequence in batch is contains array of sub-sequences, either one per question or per visit, depending on setting
+        # Each sequence in batch contains array of sub-sequences, either one per question or per visit, depending on concat_visits setting
         # Pick apart sequences to group questions across all sequences together for batch processing by encoders
-        # Target index is maintained so after processing, resulting encodings can be mapped back to respective sequences
-        # (refers to index in unrolled and padded sequence x sub-sequence matrix)
+        # Target index is maintained so after processing resulting encodings can be mapped back to respective sequences
+        # (refers to index in unrolled and padded (sequence x sub-sequence) matrix)
         sequence_lengths = [len(seq["sub_seqs"]) for seq in batch]
         max_seq_len = max(sequence_lengths)
         for seq_idx, sequence in enumerate(batch):

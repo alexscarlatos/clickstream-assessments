@@ -4,8 +4,9 @@
 *.mp4
 *.pdf
 
-models/*
-data/*
+models/*.pt
+data/*.json
+data/*.csv
 src_data/*
 figures/*
 diagrams/*

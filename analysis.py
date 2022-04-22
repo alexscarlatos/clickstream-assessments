@@ -38,8 +38,11 @@ def reduce_latent_states(latent_states: np.array, sample_rate: float, perplexity
     return reduced_states, sample_idxs
 
 def render_scatter_plots(data: np.array, reduced_states: np.array, plot_configs: list, labels: List[int] = None):
-    # TODO: using labels will make click callback results incorrect
-    # Register the plots based on their definitions
+    """
+    Register the plots based on their definitions
+    labels - will render check and x marks for 1 and 0 values repsectively. note that this causes the click callback results to be incorrect.
+    """
+
     num_cols = 2 if len(plot_configs) > 1 else 1
     num_rows = math.ceil(len(plot_configs) / num_cols)
     fig, axes = plt.subplots(num_rows, num_cols)
@@ -87,17 +90,6 @@ def cluster(model_name: str, data_file: str, options: TrainOptions):
         num_labels = len(get_problem_qids("B", type_mappings)) if options.task == "q_stats" else 1
         model = JointModel(Mode.CLUSTER, type_mappings, options, num_labels=num_labels, num_input_qids=len(block_a_qids)).to(device)
         model.load_params(torch.load(f"{model_name}.pt", map_location=device))
-
-        # dataset = Dataset(data, type_mappings, qids_for_subseq_split={1}, concat_visits=options.concat_visits, correct_as_label=True,
-        #                   time_ratios=True, log_time=False, qid_seq=True, correctness_seq=options.use_correctness)
-        # data_loader = torch.utils.data.DataLoader(
-        #     dataset,
-        #     collate_fn=Collator(),
-        #     batch_size=len(dataset)
-        # )
-        # print(len(data_loader))
-        # model = LSTMModel(Mode.CLUSTER, type_mappings, options).to(device)
-        # model.load_state_dict({key[8:]: val for key, val in torch.load(f"{model_name}.pt", map_location=device).items() if key.startswith("encoder")})
     else:
         data_loader = torch.utils.data.DataLoader(
             Dataset(data, type_mappings, labels=labels),
@@ -266,8 +258,6 @@ def visualize_irt(model_name: str, data_file: str, use_behavior_model: bool, opt
         student_to_param.setdefault(entry["student_id"], 0 if include_behavior else abilities[entry["sid"]])
         if include_behavior:
             student_to_param[entry["student_id"]] += abilities[entry["sid"]] + behavioral_values[idx]
-
-    # TODO: instead of looking at total scores, look at average question score in the test set
 
     student_params = [param for param in student_to_param.values()]
     student_to_score = {seq["student_id"]: seq["block_a_score"] + seq["block_b_score"] for seq in src_data}

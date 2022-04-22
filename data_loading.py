@@ -68,7 +68,7 @@ def add_time_ratios(sequence: dict):
     """
     td = sequence["time_deltas"]
     if len(td) == 1:
-        # TODO: deal with data issue, example is VH098810 and HELPMAT8 for student 2333126380
+        # data issue, example is VH098810 and HELPMAT8 for student 2333126380
         sequence["time_ratios"] = np.array([0])
     else:
         time_steps = td[1:] - td[:-1]
@@ -117,7 +117,6 @@ def get_sub_sequences(sequence: dict, question_ids: set, concat_visits, log_time
                 qid_sub_seqs = qid_to_sub_sequences[sub_seq["question_id"]]
                 qid_sub_seqs["event_types"] += sub_seq["event_types"]
                 qid_sub_seqs["max_gap"] = max(qid_sub_seqs["max_gap"], sub_seq["time_deltas"][0] - qid_sub_seqs["time_deltas"][-1])
-                # TODO: concat is really slow
                 qid_sub_seqs["time_deltas"] = np.concatenate([qid_sub_seqs["time_deltas"], sub_seq["time_deltas"]])
                 qid_sub_seqs["num_visits"] += 1
                 qid_sub_seqs["total_time"] += sub_seq["total_time"]
@@ -274,7 +273,6 @@ class Collator:
             # Convert data structures to torch tensors
             time_deltas = torch.from_numpy(sequence["time_deltas"])
             if len(time_deltas) < 2: # A single-event sequence messes with time_ratios calculations, so is unusable
-                # print(f"Skipping student {sequence['student_id']}, sequence has length {len(time_deltas)}")
                 continue
             if "question_ids" in sequence:
                 qids = torch.LongTensor(sequence["question_ids"])
